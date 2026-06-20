@@ -1,0 +1,8 @@
+# App-level gitignore
+# 全局忽略规则（venv, IDE, credentials 等）在项目根 .gitignore 中定义
+# 根 .gitignore 使用 /data/ 仅忽略根级 data/ 目录，因此 app/data/ 下的源码会被跟踪
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
