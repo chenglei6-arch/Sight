@@ -2,6 +2,7 @@
 多平台用户数据监控面板
 Flask 应用工厂
 """
+import os
 import sys
 import io
 
@@ -24,7 +25,7 @@ def create_app() -> Flask:
         template_folder="templates",
         static_folder="static",
     )
-    app.config["SECRET_KEY"] = "multi-platform-monitor-2024"
+    app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 
     # 注册路由
     from app.routes.api import bp as api_bp
