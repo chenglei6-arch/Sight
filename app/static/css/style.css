@@ -1058,6 +1058,10 @@ body {
   background: var(--text-muted) !important;
 }
 
+.tl-dot-ongoing {
+  background: #8b9dc3 !important;
+}
+
 .tl-suffix {
   margin-top: 4px;
   font-size: 10px;
@@ -1065,6 +1069,16 @@ body {
 
 .tl-time-unknown {
   color: var(--text-muted);
+  font-style: italic;
+}
+
+.tl-time-ongoing {
+  color: #8b9dc3;
+  font-style: italic;
+}
+
+.tl-time-first {
+  color: var(--text-secondary);
   font-style: italic;
 }
 

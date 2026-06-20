@@ -24,8 +24,8 @@ env/
 credentials/
 cookie.txt
 
-# 数据库文件
-data/
+# 数据库文件（仅根目录下的 data/ 存放 SQLite 数据库）
+/data/
 *.db
 *.sqlite
 *.sqlite3

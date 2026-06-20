@@ -215,11 +215,21 @@
 		for (var j = 0; j < entries.length; j++) {
 			var e = entries[j];
 			var dateStr = e.time_str ? e.time_str.split(" ")[0] : "";
-			if (!dateStr && e.time_suffix === "时间未知") dateStr = "时间未知";
+			// 没有精确时间戳的条目归入特殊分组
+			if (!dateStr) {
+				if (e.time_suffix === "时间未知") dateStr = "时间未知";
+				else if (e.time_suffix === "首次采集") dateStr = "首次采集";
+				else if (e.time_suffix && e.time_suffix.indexOf("至少从") === 0) dateStr = "持续在听";
+				else dateStr = "时间未知";
+			}
 			if (dateStr && dateStr !== currentDate) {
 				currentDate = dateStr;
 				if (dateStr === "时间未知") {
 					h += '<div class="timeline-date" style="color:var(--text-muted);">❓ 时间未知</div>';
+				} else if (dateStr === "首次采集") {
+					h += '<div class="timeline-date" style="color:var(--text-secondary);">📌 首次采集</div>';
+				} else if (dateStr === "持续在听") {
+					h += '<div class="timeline-date" style="color:#8b9dc3;">⏳ 持续在听</div>';
 				} else {
 					h += '<div class="timeline-date">📅 ' + currentDate + '</div>';
 				}
@@ -227,10 +237,20 @@
 			var icon = icons[e.platform] || "📌";
 			var timePart = e.time_str ? e.time_str.split(" ")[1] || "" : "";
 			var suffixHtml = "";
-			if (e.time_suffix === "时间未知") suffixHtml = '<span class="tl-time-unknown">⏳ 时间未知</span>';
-			else if (e.time_suffix) suffixHtml = '<span class="tl-time-range">🕐 ' + escHtml(e.time_suffix) + '</span>';
+			if (e.time_suffix === "时间未知") {
+				suffixHtml = '<span class="tl-time-unknown">⏳ 时间未知</span>';
+			} else if (e.time_suffix === "首次采集") {
+				suffixHtml = '<span class="tl-time-first">📌 首次采集</span>';
+			} else if (e.time_suffix && e.time_suffix.indexOf("至少从") === 0) {
+				suffixHtml = '<span class="tl-time-ongoing">' + escHtml(e.time_suffix) + '</span>';
+			} else if (e.time_suffix) {
+				suffixHtml = '<span class="tl-time-range">🕐 ' + escHtml(e.time_suffix) + '</span>';
+			}
 
-			h += '<div class="timeline-entry"><div class="tl-dot' + (e.time_suffix==='时间未知'?' tl-dot-unknown':'') + '"></div>';
+			var dotClass = 'tl-dot';
+			if (e.time_suffix === '时间未知' || e.time_suffix === '首次采集') dotClass += ' tl-dot-unknown';
+			else if (e.time_suffix && e.time_suffix.indexOf('至少从') === 0) dotClass += ' tl-dot-ongoing';
+			h += '<div class="timeline-entry"><div class="' + dotClass + '"></div>';
 			h += '<div class="tl-content"><div class="tl-meta">';
 			h += '<span class="tl-platform">' + icon + ' ' + escHtml(e.platform_name) + '</span>';
 			h += '<span class="tl-type">' + escHtml(e.event_type) + '</span><span class="tl-time">' + timePart + '</span></div>';

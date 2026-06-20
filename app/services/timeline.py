@@ -174,7 +174,12 @@ class TimelineBuilder:
                         ts = 0
                         create_time = item.get("create_time", "")
                         if create_time and create_time.isdigit():
-                            ts = int(create_time) * 1000
+                            raw_ts = int(create_time)
+                            # 网易云 createTime 已是毫秒(13位)，B站 created 是秒(10位)
+                            if raw_ts > 1000000000000:  # 13位 → 已是毫秒
+                                ts = raw_ts
+                            else:                        # 10位 → 秒，转毫秒
+                                ts = raw_ts * 1000
                         time_str = ""
                         if ts and ts > 0:
                             try:
@@ -223,6 +228,8 @@ class TimelineBuilder:
                                 inferred.append(entry)
 
                         cls._quicksort(unknown, key=lambda e: e.raw.get("data", {}).get("new_count", 0), reverse=True)
+                        # 推断出的记录按时间倒序（最新在前，未知时间的在最后）
+                        cls._quicksort(inferred, key=lambda e: e.timestamp, reverse=True)
                         entries.extend(inferred)
                         entries.extend(unknown[:10])
                         platform_count += len(inferred) + min(len(unknown), 10)
@@ -234,48 +241,40 @@ class TimelineBuilder:
 
         print(f"[Timeline] 合计 {len(entries)} 条，来自 {list(platform_uids.keys())}")
 
-        # 快排：按时间倒序排列（时间未知的排最后）
-        cls._quicksort(entries, key=lambda e: (0 if e.timestamp else 1, -e.timestamp))
+        # 按时间戳倒序排列（最新事件在最前面，timestamp=0 的未知时间条目自然排到最后）
+        cls._quicksort(entries, key=lambda e: e.timestamp, reverse=True)
         return entries
 
     @classmethod
     def _build_record_entry(
         cls, platform: str, pname: str, change: dict
     ) -> TimelineEntry:
-        """根据一条记录变化构建时间线条目"""
+        """根据一条记录变化构建时间线条目
+
+        支持的 change_type:
+          - "new"         → 最近两次快照之间新出现
+          - "increased"   → 最近两次快照之间播放次数增加
+          - "first_seen"  → 在更早快照中首次出现（有首次检测时间窗口）
+          - "ongoing"     → 最早快照中已存在（至少从某时间开始）
+          - "new_first"   → 仅有一次快照，无法推断
+        """
         song_name = change.get("song_name", "")
         artist = change.get("artist", "")
-        change_type = change.get("change_type", "unchanged")
+        change_type = change.get("change_type", "ongoing")
         delta = change.get("delta", 0)
         new_count = change.get("new_count", 0)
         time_range = change.get("time_range")
+        first_seen_time = change.get("first_seen_time", "")
+        first_seen_range = change.get("first_seen_range")
         period = change.get("period", "all")
 
         period_label = "周榜" if period == "week" else ""
 
-        if change_type == "unchanged" or time_range is None:
-            # 时间未知
-            timestamp = 0
-            time_str = ""
-            time_suffix = "时间未知"
-
-            if change_type == "unchanged" and new_count > 0:
-                detail = f"已听 {new_count} 次"
-            elif change_type == "unchanged":
-                detail = ""
-            else:
-                detail = ""
-
-            summary = f"[{pname}] {period_label}在听《{song_name}》"
-            if artist:
-                summary += f" - {artist}"
-
-        else:
-            # 可推断时间范围
+        # ---- 处理有精确时间范围的情况 ----
+        if time_range:
             since_str = time_range.get("since", "")
             until_str = time_range.get("until", "")
 
-            # 格式化为可读时间
             since_readable = cls._iso_to_readable(since_str)
             until_readable = cls._iso_to_readable(until_str)
 
@@ -298,18 +297,53 @@ class TimelineBuilder:
             if change_type == "new":
                 summary = f"[{pname}] {period_label}开始听《{song_name}》"
                 detail = f"首次出现，已听 {new_count} 次"
-            elif change_type == "new_first":
-                summary = f"[{pname}] {period_label}在听《{song_name}》"
-                detail = f"已听 {new_count} 次（首次采集，无法推断开始时间）"
             elif change_type == "increased":
                 summary = f"[{pname}] {period_label}又在听《{song_name}》"
                 detail = f"播放 +{delta} 次（共 {new_count} 次）"
+            elif change_type == "first_seen":
+                summary = f"[{pname}] {period_label}首次检测到在听《{song_name}》"
+                detail = f"首次出现，已听 {new_count} 次"
             else:
                 summary = f"[{pname}] {period_label}在听《{song_name}》"
                 detail = f"已听 {new_count} 次"
 
-            if artist:
-                summary += f" - {artist}"
+        # ---- 处理无精确时间范围的情况 ----
+        else:
+            timestamp = 0
+            time_str = ""
+
+            if change_type == "ongoing":
+                # 最早快照中就存在 → 显示"至少从 XX 开始"
+                ongoing_since = cls._iso_to_readable(first_seen_time)
+                if ongoing_since:
+                    time_suffix = f"⏳ 至少从 {ongoing_since} 开始"
+                else:
+                    time_suffix = "持续在听"
+                summary = f"[{pname}] {period_label}持续在听《{song_name}》"
+                detail = f"已听 {new_count} 次"
+                # 用 first_seen_time 作为排序时间戳，使条目排在对应日期附近
+                if first_seen_time:
+                    try:
+                        dt_first = datetime.fromisoformat(first_seen_time)
+                        timestamp = int(dt_first.timestamp() * 1000)
+                        time_str = ongoing_since
+                    except (ValueError, TypeError):
+                        pass
+
+            elif change_type == "new_first":
+                # 首次采集，无历史数据
+                time_suffix = "首次采集"
+                summary = f"[{pname}] {period_label}在听《{song_name}》"
+                detail = f"已听 {new_count} 次（首次采集，无法推断开始时间）"
+
+            else:
+                # 兜底：时间未知
+                time_suffix = "时间未知"
+                summary = f"[{pname}] {period_label}在听《{song_name}》"
+                detail = f"已听 {new_count} 次" if new_count > 0 else ""
+
+        if artist:
+            summary += f" - {artist}"
 
         return TimelineEntry(
             timestamp=timestamp,
@@ -326,7 +360,7 @@ class TimelineBuilder:
 
     @classmethod
     def _iso_to_readable(cls, iso_str: str) -> str:
-        """ISO 时间 → 可读格式（月.日 时:分）"""
+        """ISO 时间 → 可读格式（年.月.日 时:分）"""
         if not iso_str:
             return ""
         try:
@@ -336,7 +370,7 @@ class TimelineBuilder:
                 dt = dt.replace(tzinfo=CST)
             else:
                 dt = dt.astimezone(CST)
-            return dt.strftime("%m.%d %H:%M")
+            return dt.strftime("%Y.%m.%d %H:%M")
         except (ValueError, TypeError):
             return ""
 
@@ -349,18 +383,19 @@ class TimelineBuilder:
         for entry in entries:
             if entry.time_str:
                 time_part = entry.time_str
-            elif entry.time_suffix == "时间未知":
-                time_part = "----.--.--"
+            elif entry.time_suffix and entry.time_suffix.startswith("⏳"):
+                # "⏳ 至少从 2026.06.20 14:30 开始" → 提取时间部分
+                time_part = entry.time_suffix.replace("⏳ 至少从 ", "").replace(" 开始", "")
+            elif entry.time_suffix == "首次采集":
+                time_part = "----.--.-- --:--"
             else:
-                time_part = entry.time_suffix
+                time_part = entry.time_suffix or "----.--.--"
 
             line = f"{time_part}  {entry.summary}"
             if entry.detail:
                 line += f"（{entry.detail}）"
-            if entry.time_suffix and entry.time_suffix not in ("时间未知",):
+            if entry.time_suffix and entry.time_suffix not in ("时间未知", ""):
                 line += f"  [{entry.time_suffix}]"
-            elif entry.time_suffix == "时间未知":
-                line += "  [时间未知]"
             lines.append(line)
         return "\n".join(lines)
 
@@ -373,18 +408,20 @@ class TimelineBuilder:
             icon = {"netease": "🎵", "bilibili": "📺"}.get(entry.platform, "📌")
             if entry.time_str:
                 time_part = f"**{entry.time_str}**"
-            elif entry.time_suffix == "时间未知":
-                time_part = "**时间未知**"
+            elif entry.time_suffix and entry.time_suffix.startswith("⏳"):
+                # "⏳ 至少从 2026.06.20 14:30 开始" → 提取时间
+                since = entry.time_suffix.replace("⏳ 至少从 ", "").replace(" 开始", "")
+                time_part = f"**{since}**"
+            elif entry.time_suffix == "首次采集":
+                time_part = "**首次采集**"
             else:
-                time_part = f"**{entry.time_suffix}**"
+                time_part = f"**{entry.time_suffix or '时间未知'}**"
 
             line = f"- {time_part} {icon} {entry.summary}"
             if entry.detail:
                 line += f"（{entry.detail}）"
             if entry.time_suffix and entry.time_suffix not in ("时间未知", ""):
                 line += f" _{entry.time_suffix}_"
-            elif entry.time_suffix == "时间未知":
-                line += " _时间未知_"
             lines.append(line)
         return "\n".join(lines)
 
