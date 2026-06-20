@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>多平台用户数据监控</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=16">
+</head>
+<body>
+
+<!-- ====== Header ====== -->
+<header class="header">
+  <div class="header-left">
+    <h1>📊 多平台用户监控</h1>
+    <span class="status-dot pulse" id="status-dot"></span>
+  </div>
+  <div class="header-right">
+    <span id="collector-badge" style="font-size:11px;color:var(--text-muted);">采集器: 未启动</span>
+    <span class="refresh-info" id="refresh-info">等待首次加载</span>
+    <label class="toggle-wrap"><span>自动</span><label class="toggle"><input type="checkbox" id="auto-refresh"><span class="slider"></span></label></label>
+    <button class="btn" id="refresh-btn" onclick="refreshCurrentView()">🔄 刷新</button>
+    <button class="btn" onclick="collectOnce()">📸 采集</button>
+  </div>
+</header>
+
+<div class="container">
+  <!-- ====== Sidebar Navigation ====== -->
+  <aside class="sidebar">
+    <!-- 网易云 -->
+    <div class="nav-card active" id="nav-netease" data-view="netease">
+      <div class="nav-card-header" onclick="switchView('netease')">
+        <span class="pc-icon">🎵</span>
+        <span>网易云音乐</span>
+        <span class="pc-status" id="netease-status">●</span>
+      </div>
+      <div class="nav-card-body">
+        <div class="pc-input-row">
+          <input type="text" id="netease-uid" placeholder="输入 UID 或昵称..." value="" onchange="onUidChange('netease')">
+          <button onclick="searchAndSet('netease')">🔍</button>
+        </div>
+        <div class="pc-search-results" id="netease-results"></div>
+        <div class="pc-profile-mini" id="netease-mini"></div>
+      </div>
+    </div>
+
+    <!-- B站 -->
+    <div class="nav-card" id="nav-bilibili" data-view="bilibili">
+      <div class="nav-card-header" onclick="switchView('bilibili')">
+        <span class="pc-icon">📺</span>
+        <span>哔哩哔哩</span>
+        <span class="pc-status" id="bilibili-status">●</span>
+      </div>
+      <div class="nav-card-body">
+        <div class="pc-input-row">
+          <input type="text" id="bilibili-uid" placeholder="输入 UID 或昵称..." value="" onchange="onUidChange('bilibili')">
+          <button onclick="searchAndSet('bilibili')">🔍</button>
+        </div>
+        <div class="pc-search-results" id="bilibili-results"></div>
+        <div class="pc-profile-mini" id="bilibili-mini"></div>
+      </div>
+    </div>
+
+    <!-- 时间线 -->
+    <div class="nav-card" id="nav-timeline" data-view="timeline">
+      <div class="nav-card-header" onclick="switchView('timeline')">
+        <span class="pc-icon">🕐</span>
+        <span>活动时间线</span>
+      </div>
+    </div>
+
+    <!-- 未来平台在这里加新的 nav-card 即可 -->
+
+    <!-- 采集器 -->
+    <div class="platform-config-card" style="margin-top:8px;">
+      <div class="pc-header"><span class="pc-icon">⏱</span>自动采集</div>
+      <div class="pc-body">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+          <span style="font-size:11px;">间隔(分):</span>
+          <input type="number" id="collector-interval" value="30" min="5" style="width:60px;padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);">
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn" onclick="startCollector()" style="flex:1;font-size:11px;">▶ 启动</button>
+          <button class="btn" onclick="stopCollector()" style="flex:1;font-size:11px;">⏹ 停止</button>
+        </div>
+        <div id="collector-log" style="margin-top:6px;max-height:80px;overflow-y:auto;font-size:10px;color:var(--text-muted);"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ====== Main Content Area ====== -->
+  <div class="main" id="main-content">
+    <div class="platform-panel" id="view-content">
+      <div class="loading"><div class="spinner"></div>加载中...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-content"></div></div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}?v=16"></script>
+</body>
+</html>
