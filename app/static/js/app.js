@@ -613,6 +613,100 @@
 		fetchAllData().then(function() { renderFromCache(currentView); });
 	};
 
+	// ==================== 歌单歌曲异步拉取 ====================
+	var fetchSongsPollTimer = null;
+	var fetchSongsPlatforms = [];
+
+	window.fetchAllPlaylistSongs = function() {
+		// 收集所有有 UID 的平台
+		var platforms = [];
+		for (var p in targetUids) {
+			if (targetUids[p]) platforms.push(p);
+		}
+		if (!platforms.length) return;
+
+		fetchSongsPlatforms = platforms.slice();
+		var btn = document.getElementById("fetch-songs-btn");
+		if (btn) { btn.disabled = true; btn.textContent = "⏳ 拉取中..."; }
+		fetchNextPlatformSongs(0);
+	};
+
+	function fetchNextPlatformSongs(index) {
+		if (index >= fetchSongsPlatforms.length) {
+			// 全部完成
+			var btn = document.getElementById("fetch-songs-btn");
+			if (btn) { btn.disabled = false; btn.textContent = "🎵 拉取歌单详情"; }
+			var prog = document.getElementById("fetch-songs-progress");
+			if (prog) { prog.style.display = "none"; }
+			// 刷新时间线
+			fetchAllData().then(function() { renderFromCache(currentView); });
+			return;
+		}
+
+		var platform = fetchSongsPlatforms[index];
+		var uid = targetUids[platform];
+		var prog = document.getElementById("fetch-songs-progress");
+		if (prog) { prog.style.display = "inline"; prog.textContent = platform + " 歌单: 启动中..."; }
+
+		// 启动后台拉取
+		fetch("/api/" + platform + "/fetch-songs/start?uid=" + uid, { method: "POST" })
+			.then(function(r) { return r.json(); })
+			.then(function(d) {
+				if (d.code === 200) {
+					pollFetchSongs(platform, uid, index);
+				} else {
+					console.error("fetch-songs start failed:", d.message);
+					fetchNextPlatformSongs(index + 1);
+				}
+			})
+			.catch(function(e) {
+				console.error("fetch-songs start error:", e);
+				fetchNextPlatformSongs(index + 1);
+			});
+	}
+
+	function pollFetchSongs(platform, uid, platformIndex) {
+		if (fetchSongsPollTimer) clearTimeout(fetchSongsPollTimer);
+
+		fetch("/api/" + platform + "/fetch-songs/status?uid=" + uid)
+			.then(function(r) { return r.json(); })
+			.then(function(d) {
+				if (d.code !== 200) return;
+
+				var s = d.data;
+				var prog = document.getElementById("fetch-songs-progress");
+				if (s.complete) {
+					if (prog) prog.textContent = platform + " 歌单: ✓ 完成 (" + s.fetched + "/" + s.total + ")";
+					// 刷新当前视图（歌单列表会显示加载状态）
+					renderFromCache(currentView);
+					// 继续下一个平台
+					setTimeout(function() { fetchNextPlatformSongs(platformIndex + 1); }, 500);
+				} else if (s.running) {
+					var pct = s.total > 0 ? Math.round(s.fetched / s.total * 100) : 0;
+					if (prog) prog.textContent = platform + " 歌单: " + s.fetched + "/" + s.total + " (" + pct + "%) " + (s.current || "");
+					// 实时刷新视图 + 继续轮询
+					renderFromCache(currentView);
+					fetchSongsPollTimer = setTimeout(function() { pollFetchSongs(platform, uid, platformIndex); }, 2000);
+				} else {
+					// 已停止或有错误
+					if (prog && s.error) prog.textContent = platform + " 歌单: ✕ " + s.error;
+					fetchNextPlatformSongs(platformIndex + 1);
+				}
+			})
+			.catch(function(e) {
+				console.error("poll error:", e);
+				fetchNextPlatformSongs(platformIndex + 1);
+			});
+	}
+
+	// ==================== 歌单卡片加载状态 ====================
+	// 检查某个歌单的歌曲是否已拉取
+	function isPlaylistSongsFetched(platform, playlistId) {
+		// 从 timeline 或缓存中检查 playlist_songs 数据
+		// 简化: 始终返回 false 以显示加载中提示（实际由后台线程填充）
+		return false;
+	}
+
 	if (document.readyState === "loading") {
 		document.addEventListener("DOMContentLoaded", init);
 	} else { init(); }

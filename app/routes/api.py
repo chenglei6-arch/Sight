@@ -437,10 +437,16 @@ def platform_all(platform):
             errors.append(f"events: {e}")
             print(f"[{platform}] /all events 异常: {e}")
 
-        # 关注
+        # 关注（同时保存快照供变化检测）
         result["follows"] = []
         try:
-            result["follows"] = adapter.get_follows(uid)
+            follows_list = adapter.get_follows(uid)
+            result["follows"] = follows_list
+            if follows_list:
+                get_store().save_snapshot(platform, uid, "follows", {
+                    "count": len(follows_list),
+                    "items": follows_list,
+                })
         except Exception as e:
             errors.append(f"follows: {e}")
 
@@ -744,6 +750,40 @@ def collector_logs():
     c = get_collector()
     limit = int(request.args.get("limit", 50))
     return _result(c.get_recent_logs(limit))
+
+
+# ==================== 歌单歌曲异步拉取 ====================
+
+@bp.route("/<platform>/fetch-songs/start", methods=["POST"])
+def start_fetch_songs(platform):
+    """启动后台异步拉取歌单歌曲详情"""
+    uid = request.args.get("uid", _get_uid(platform))
+    if not uid:
+        return _error("未指定用户 UID", http_status=400)
+
+    try:
+        from app.services.playlist_fetcher import get_playlist_fetcher
+        fetcher = get_playlist_fetcher()
+        status = fetcher.start_fetch(platform, uid)
+        return _result(status)
+    except Exception as e:
+        return _error(str(e))
+
+
+@bp.route("/<platform>/fetch-songs/status")
+def fetch_songs_status(platform):
+    """查询歌单歌曲拉取进度"""
+    uid = request.args.get("uid", _get_uid(platform))
+    if not uid:
+        return _error("未指定用户 UID", http_status=400)
+
+    try:
+        from app.services.playlist_fetcher import get_playlist_fetcher
+        fetcher = get_playlist_fetcher()
+        status = fetcher.get_status(platform, uid)
+        return _result(status)
+    except Exception as e:
+        return _error(str(e))
 
 
 # ==================== 旧路由兼容（无 platform 参数时默认 netease） ====================

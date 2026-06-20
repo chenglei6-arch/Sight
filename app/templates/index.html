@@ -17,10 +17,12 @@
   </div>
   <div class="header-right">
     <span id="collector-badge" style="font-size:11px;color:var(--text-muted);">采集器: 未启动</span>
+    <span id="fetch-songs-progress" style="font-size:11px;color:var(--warning);display:none;"></span>
     <span class="refresh-info" id="refresh-info">等待首次加载</span>
     <label class="toggle-wrap"><span>自动</span><label class="toggle"><input type="checkbox" id="auto-refresh"><span class="slider"></span></label></label>
     <button class="btn" id="refresh-btn" onclick="refreshCurrentView()">🔄 刷新</button>
     <button class="btn" onclick="collectOnce()">📸 采集</button>
+    <button class="btn" onclick="fetchAllPlaylistSongs()" id="fetch-songs-btn">🎵 拉取歌单详情</button>
   </div>
 </header>
 

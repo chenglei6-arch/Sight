@@ -123,6 +123,18 @@ class AutoCollector:
                     }
                     self._store.save_snapshot(platform_id, uid, "records", records_data)
 
+                # 采集关注列表
+                try:
+                    follows = adapter.get_follows(uid)
+                    if follows:
+                        follows_data = {
+                            "count": len(follows),
+                            "items": follows,
+                        }
+                        self._store.save_snapshot(platform_id, uid, "follows", follows_data)
+                except Exception as e:
+                    print(f"[Collector] {platform_id}:{uid} 关注采集失败: {e}")
+
                 self._last_run[platform_id] = now_iso
 
                 entry = {
@@ -131,13 +143,15 @@ class AutoCollector:
                     "uid": uid,
                     "events_count": len(events) if events else 0,
                     "items_count": len(items) if items else 0,
+                    "follows_count": len(follows) if follows else 0,
                     "success": True,
                 }
                 new_entries.append(entry)
                 self._log_entries.append(entry)
 
                 print(f"[Collector] {platform_id}:{uid} 采集完成 "
-                      f"(动态{len(events) if events else 0}, 内容{len(items) if items else 0})")
+                      f"(动态{len(events) if events else 0}, 内容{len(items) if items else 0}, "
+                      f"关注{len(follows) if follows else 0})")
 
             except Exception as e:
                 print(f"[Collector] {platform_id}:{uid} 采集失败: {e}")

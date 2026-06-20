@@ -494,3 +494,248 @@ class DataStore:
         # 按 song_id 排序保证稳定输出
         changes.sort(key=lambda c: c["song_id"])
         return changes
+
+    # ==================== 关注变化检测 ====================
+
+    def detect_follow_changes(
+        self, platform: str, uid: str
+    ) -> dict:
+        """
+        对比最近两次 follows 快照，检测关注变化。
+
+        Returns:
+            {
+                has_data, latest_time, previous_time,
+                changes: [{follow_uid, nickname, avatar, change_type, time_range}, ...]
+            }
+            change_type: "new_follow" | "unfollow"
+        """
+        rows = self._connect().execute(
+            "SELECT data_json, created_at FROM snapshots "
+            "WHERE platform=? AND uid=? AND data_type='follows' "
+            "ORDER BY created_at DESC, id DESC LIMIT 2",
+            (platform, uid),
+        ).fetchall()
+
+        if len(rows) < 2:
+            return {
+                "has_data": len(rows) > 0,
+                "changes": [],
+                "snapshots_count": len(rows),
+            }
+
+        latest_data = json.loads(rows[0]["data_json"])
+        previous_data = json.loads(rows[1]["data_json"])
+        latest_time = rows[0]["created_at"]
+        previous_time = rows[1]["created_at"]
+
+        latest_items = latest_data.get("items", [])
+        previous_items = previous_data.get("items", [])
+
+        # 用 uid 建立索引
+        latest_uids = {str(f.get("uid", "")) for f in latest_items}
+        previous_uids = {str(f.get("uid", "")) for f in previous_items}
+
+        # 用最新数据建立详情查找表
+        latest_detail = {str(f.get("uid", "")): f for f in latest_items}
+        previous_detail = {str(f.get("uid", "")): f for f in previous_items}
+
+        new_follows = latest_uids - previous_uids
+        unfollows = previous_uids - latest_uids
+
+        changes = []
+        time_range = {"since": previous_time, "until": latest_time}
+
+        for fuid in new_follows:
+            user = latest_detail[fuid]
+            changes.append({
+                "follow_uid": fuid,
+                "nickname": user.get("nickname", ""),
+                "avatar": user.get("avatarUrl", ""),
+                "signature": user.get("signature", ""),
+                "change_type": "new_follow",
+                "time_range": time_range,
+            })
+
+        for fuid in unfollows:
+            user = previous_detail.get(fuid, {})
+            changes.append({
+                "follow_uid": fuid,
+                "nickname": user.get("nickname", "已取关用户"),
+                "avatar": user.get("avatarUrl", ""),
+                "signature": user.get("signature", ""),
+                "change_type": "unfollow",
+                "time_range": time_range,
+            })
+
+        return {
+            "has_data": True,
+            "latest_time": latest_time,
+            "previous_time": previous_time,
+            "snapshots_count": len(rows),
+            "changes": changes,
+        }
+
+    # ==================== 歌单/内容列表变化检测 ====================
+
+    def detect_playlist_changes(
+        self, platform: str, uid: str
+    ) -> dict:
+        """
+        对比最近两次 playlists 快照，检测新增的歌单/收藏夹。
+
+        Returns:
+            {
+                has_data, latest_time, previous_time,
+                changes: [{item_id, title, creator, change_type, time_range}, ...]
+            }
+            change_type: "new_playlist" | "removed_playlist"
+        """
+        rows = self._connect().execute(
+            "SELECT data_json, created_at FROM snapshots "
+            "WHERE platform=? AND uid=? AND data_type='playlists' "
+            "ORDER BY created_at DESC, id DESC LIMIT 2",
+            (platform, uid),
+        ).fetchall()
+
+        if len(rows) < 2:
+            return {
+                "has_data": len(rows) > 0,
+                "changes": [],
+                "snapshots_count": len(rows),
+            }
+
+        latest_data = json.loads(rows[0]["data_json"])
+        previous_data = json.loads(rows[1]["data_json"])
+        latest_time = rows[0]["created_at"]
+        previous_time = rows[1]["created_at"]
+
+        latest_items = latest_data.get("items", [])
+        previous_items = previous_data.get("items", [])
+
+        # 用 item_id 建立索引
+        latest_ids = {str(it.get("item_id", it.get("id", ""))) for it in latest_items}
+        previous_ids = {str(it.get("item_id", it.get("id", ""))) for it in previous_items}
+
+        latest_detail = {str(it.get("item_id", it.get("id", ""))): it for it in latest_items}
+        previous_detail = {str(it.get("item_id", it.get("id", ""))): it for it in previous_items}
+
+        new_playlists = latest_ids - previous_ids
+        removed = previous_ids - latest_ids
+
+        changes = []
+        time_range = {"since": previous_time, "until": latest_time}
+
+        for pid in new_playlists:
+            item = latest_detail[pid]
+            changes.append({
+                "item_id": pid,
+                "title": item.get("title", item.get("name", "")),
+                "creator": item.get("creator", ""),
+                "cover_url": item.get("cover_url", item.get("coverImgUrl", "")),
+                "is_owner": item.get("is_owner", True),
+                "change_type": "new_playlist",
+                "time_range": time_range,
+            })
+
+        for pid in removed:
+            item = previous_detail.get(pid, {})
+            changes.append({
+                "item_id": pid,
+                "title": item.get("title", item.get("name", "已删除")),
+                "creator": item.get("creator", ""),
+                "cover_url": item.get("cover_url", item.get("coverImgUrl", "")),
+                "is_owner": item.get("is_owner", True),
+                "change_type": "removed_playlist",
+                "time_range": time_range,
+            })
+
+        return {
+            "has_data": True,
+            "latest_time": latest_time,
+            "previous_time": previous_time,
+            "snapshots_count": len(rows),
+            "changes": changes,
+        }
+
+    # ==================== 歌单歌曲变化检测 ====================
+
+    def detect_playlist_song_changes(
+        self, platform: str, uid: str
+    ) -> dict:
+        """
+        对比最近两次 playlist_songs 快照，检测歌单内歌曲增减。
+
+        Returns:
+            changes: [{
+                playlist_id, playlist_title,
+                song_id, song_title, artist,
+                change_type: "song_added" | "song_removed",
+                time_range: {since, until}
+            }, ...]
+        """
+        rows = self._connect().execute(
+            "SELECT data_json, created_at FROM snapshots "
+            "WHERE platform=? AND uid=? AND data_type='playlist_songs' "
+            "ORDER BY created_at DESC, id DESC LIMIT 2",
+            (platform, uid),
+        ).fetchall()
+
+        if len(rows) < 2:
+            return {"has_data": len(rows) > 0, "changes": [], "snapshots_count": len(rows)}
+
+        latest_data = json.loads(rows[0]["data_json"])
+        previous_data = json.loads(rows[1]["data_json"])
+        latest_time = rows[0]["created_at"]
+        previous_time = rows[1]["created_at"]
+
+        # 跳过仍在拉取中的快照
+        if latest_data.get("fetching") or previous_data.get("fetching"):
+            return {"has_data": True, "changes": [], "snapshots_count": len(rows),
+                    "skipped": "fetching_in_progress"}
+
+        latest_pls = latest_data.get("playlists", {})
+        previous_pls = previous_data.get("playlists", {})
+
+        changes = []
+        time_range = {"since": previous_time, "until": latest_time}
+
+        for pl_id, pl_info in latest_pls.items():
+            prev_info = previous_pls.get(pl_id, {})
+            latest_songs = {s.get("id", ""): s for s in pl_info.get("songs", [])}
+            prev_songs = {s.get("id", ""): s for s in prev_info.get("songs", [])}
+
+            new_ids = set(latest_songs.keys()) - set(prev_songs.keys())
+            removed_ids = set(prev_songs.keys()) - set(latest_songs.keys())
+
+            for sid in new_ids:
+                song = latest_songs[sid]
+                changes.append({
+                    "playlist_id": pl_id,
+                    "playlist_title": pl_info.get("title", ""),
+                    "song_id": sid,
+                    "song_title": song.get("title", ""),
+                    "artist": song.get("artist", ""),
+                    "change_type": "song_added",
+                    "time_range": time_range,
+                })
+
+            for sid in removed_ids:
+                song = prev_songs.get(sid, {})
+                changes.append({
+                    "playlist_id": pl_id,
+                    "playlist_title": pl_info.get("title", ""),
+                    "song_id": sid,
+                    "song_title": song.get("title", "已移除"),
+                    "artist": song.get("artist", ""),
+                    "change_type": "song_removed",
+                    "time_range": time_range,
+                })
+
+        return {
+            "has_data": True,
+            "latest_time": latest_time,
+            "previous_time": previous_time,
+            "snapshots_count": len(rows),
+            "changes": changes,
+        }

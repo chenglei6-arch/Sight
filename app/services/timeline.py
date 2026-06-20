@@ -237,6 +237,48 @@ class TimelineBuilder:
                 except Exception as e:
                     print(f"[Timeline] {platform_id} 记录对比失败: {e}")
 
+            # ---- 关注变化（快照对比推断）----
+            try:
+                follow_changes = store.detect_follow_changes(platform_id, uid)
+                if follow_changes.get("has_data") and follow_changes["changes"]:
+                    fc_added = 0
+                    for fc in follow_changes["changes"]:
+                        entry = cls._build_follow_entry(platform_id, pname, fc)
+                        entries.append(entry)
+                        fc_added += 1
+                    platform_count += fc_added
+                    print(f"[Timeline] {platform_id}:{uid} 关注变化加入 {fc_added} 条")
+            except Exception as e:
+                print(f"[Timeline] {platform_id} 关注检测失败: {e}")
+
+            # ---- 歌单/内容列表变化（快照对比推断）----
+            try:
+                pl_changes = store.detect_playlist_changes(platform_id, uid)
+                if pl_changes.get("has_data") and pl_changes["changes"]:
+                    pl_added = 0
+                    for pc in pl_changes["changes"]:
+                        entry = cls._build_playlist_entry(platform_id, pname, pc)
+                        entries.append(entry)
+                        pl_added += 1
+                    platform_count += pl_added
+                    print(f"[Timeline] {platform_id}:{uid} 歌单/内容变化加入 {pl_added} 条")
+            except Exception as e:
+                print(f"[Timeline] {platform_id} 歌单检测失败: {e}")
+
+            # ---- 歌单内歌曲变化（快照对比推断，需先拉取歌单详情）----
+            try:
+                song_changes = store.detect_playlist_song_changes(platform_id, uid)
+                if song_changes.get("has_data") and song_changes["changes"]:
+                    sc_added = 0
+                    for sc in song_changes["changes"]:
+                        entry = cls._build_song_change_entry(platform_id, pname, sc)
+                        entries.append(entry)
+                        sc_added += 1
+                    platform_count += sc_added
+                    print(f"[Timeline] {platform_id}:{uid} 歌单歌曲变化加入 {sc_added} 条")
+            except Exception as e:
+                print(f"[Timeline] {platform_id} 歌曲变化检测失败: {e}")
+
             print(f"[Timeline] {platform_id}:{uid} 本平台共加入 {platform_count} 条")
 
         print(f"[Timeline] 合计 {len(entries)} 条，来自 {list(platform_uids.keys())}")
@@ -356,6 +398,157 @@ class TimelineBuilder:
             time_suffix=time_suffix,
             time_range=time_range or {},
             raw={"type": "record_change", "data": change},
+        )
+
+    @classmethod
+    def _build_follow_entry(
+        cls, platform: str, pname: str, change: dict
+    ) -> TimelineEntry:
+        """根据关注变化构建时间线条目"""
+        nickname = change.get("nickname", "")
+        change_type = change.get("change_type", "new_follow")
+        time_range = change.get("time_range")
+
+        since_str = time_range.get("since", "") if time_range else ""
+        until_str = time_range.get("until", "") if time_range else ""
+
+        since_readable = cls._iso_to_readable(since_str)
+        until_readable = cls._iso_to_readable(until_str)
+
+        try:
+            dt_until = datetime.fromisoformat(until_str) if until_str else None
+            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
+            time_str = until_readable
+        except (ValueError, TypeError):
+            timestamp = 0
+            time_str = ""
+
+        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
+
+        if change_type == "new_follow":
+            summary = f"[{pname}] 关注了 {nickname}"
+            detail = ""
+        elif change_type == "unfollow":
+            summary = f"[{pname}] 取关了 {nickname}"
+            detail = ""
+        else:
+            summary = f"[{pname}] 关注变化: {nickname}"
+            detail = ""
+
+        return TimelineEntry(
+            timestamp=timestamp,
+            platform=platform,
+            platform_name=pname,
+            event_type="关注变化",
+            summary=summary,
+            detail=detail,
+            time_str=time_str,
+            time_suffix=time_suffix,
+            time_range=time_range or {},
+            raw={"type": "follow_change", "data": change},
+        )
+
+    @classmethod
+    def _build_playlist_entry(
+        cls, platform: str, pname: str, change: dict
+    ) -> TimelineEntry:
+        """根据歌单/内容列表变化构建时间线条目"""
+        title = change.get("title", "")
+        change_type = change.get("change_type", "new_playlist")
+        time_range = change.get("time_range")
+        is_owner = change.get("is_owner", True)
+
+        since_str = time_range.get("since", "") if time_range else ""
+        until_str = time_range.get("until", "") if time_range else ""
+
+        since_readable = cls._iso_to_readable(since_str)
+        until_readable = cls._iso_to_readable(until_str)
+
+        try:
+            dt_until = datetime.fromisoformat(until_str) if until_str else None
+            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
+            time_str = until_readable
+        except (ValueError, TypeError):
+            timestamp = 0
+            time_str = ""
+
+        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
+
+        if platform == "netease":
+            action = "创建了歌单" if is_owner else "收藏了歌单"
+            detail = ""
+        elif platform == "bilibili":
+            action = "发布了" if is_owner else "收藏了"
+            detail = ""
+        else:
+            action = "新增了"
+
+        if change_type == "removed_playlist":
+            action = "删除了" if platform != "netease" else "移除了歌单"
+
+        summary = f"[{pname}] {action}《{title}》"
+
+        return TimelineEntry(
+            timestamp=timestamp,
+            platform=platform,
+            platform_name=pname,
+            event_type="内容变化",
+            summary=summary,
+            detail=detail,
+            time_str=time_str,
+            time_suffix=time_suffix,
+            time_range=time_range or {},
+            raw={"type": "playlist_change", "data": change},
+        )
+
+    @classmethod
+    def _build_song_change_entry(
+        cls, platform: str, pname: str, change: dict
+    ) -> TimelineEntry:
+        """根据歌单内歌曲变化构建时间线条目"""
+        playlist_title = change.get("playlist_title", "")
+        song_title = change.get("song_title", "")
+        artist = change.get("artist", "")
+        change_type = change.get("change_type", "song_added")
+        time_range = change.get("time_range")
+
+        since_str = time_range.get("since", "") if time_range else ""
+        until_str = time_range.get("until", "") if time_range else ""
+
+        since_readable = cls._iso_to_readable(since_str)
+        until_readable = cls._iso_to_readable(until_str)
+
+        try:
+            dt_until = datetime.fromisoformat(until_str) if until_str else None
+            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
+            time_str = until_readable
+        except (ValueError, TypeError):
+            timestamp = 0
+            time_str = ""
+
+        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
+
+        if change_type == "song_added":
+            summary = f"[{pname}] 在歌单《{playlist_title}》中加入《{song_title}》"
+        elif change_type == "song_removed":
+            summary = f"[{pname}] 从歌单《{playlist_title}》中移除《{song_title}》"
+        else:
+            summary = f"[{pname}] 歌单《{playlist_title}》变化: {song_title}"
+
+        if artist:
+            summary += f" - {artist}"
+
+        return TimelineEntry(
+            timestamp=timestamp,
+            platform=platform,
+            platform_name=pname,
+            event_type="歌单歌曲变化",
+            summary=summary,
+            detail="",
+            time_str=time_str,
+            time_suffix=time_suffix,
+            time_range=time_range or {},
+            raw={"type": "song_change", "data": change},
         )
 
     @classmethod
