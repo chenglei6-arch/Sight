@@ -33,6 +33,7 @@ class PlaylistSongFetcher:
                 "running": True,
                 "total": 0,
                 "fetched": 0,
+                "failed": 0,
                 "current": "",
                 "error": None,
                 "complete": False,
@@ -58,10 +59,12 @@ class PlaylistSongFetcher:
         if existing:
             fetched = existing.get("fetched", 0)
             total = existing.get("total", 0)
+            failed = existing.get("failed", 0)
             return {
                 "running": False,
                 "total": total,
                 "fetched": fetched,
+                "failed": failed,
                 "current": "",
                 "error": None,
                 "complete": fetched >= total > 0,
@@ -70,6 +73,7 @@ class PlaylistSongFetcher:
             "running": False,
             "total": 0,
             "fetched": 0,
+            "failed": 0,
             "current": "",
             "error": None,
             "complete": False,
@@ -97,6 +101,7 @@ class PlaylistSongFetcher:
             # 收集结果
             result = {}
             fetched = 0
+            failed = 0
 
             for i, pl in enumerate(playlists):
                 pl_id = getattr(pl, "item_id", "") or str(pl.get("item_id", pl.get("id", "")))
@@ -107,9 +112,10 @@ class PlaylistSongFetcher:
                 with self._lock:
                     self._status[key]["current"] = pl_title
                     self._status[key]["fetched"] = fetched
+                    self._status[key]["failed"] = failed
 
                 # 保存中间进度到 DB（每完成一个就写一次）
-                self._save_progress(platform, uid, result, total, fetched)
+                self._save_progress(platform, uid, result, total, fetched, failed)
 
                 # 拉取歌单详情
                 try:
@@ -118,7 +124,11 @@ class PlaylistSongFetcher:
                     print(f"[PlaylistFetcher] {pl_title} 详情获取失败: {e}")
                     detail = None
 
-                if detail and detail.get("items"):
+                if detail is None:
+                    # 请求失败（反爬/网络错误等），跳过此歌单，不写入空数据
+                    failed += 1
+                    print(f"[PlaylistFetcher] {pl_title} 请求失败，跳过 (已失败 {failed} 个)")
+                elif detail.get("items"):
                     songs = []
                     for s in detail["items"]:
                         songs.append({
@@ -133,15 +143,15 @@ class PlaylistSongFetcher:
                         "songs": songs,
                         "fetched_at": datetime.now(CST).isoformat(timespec="seconds"),
                     }
+                    fetched += 1
                 else:
-                    # 空歌单或获取失败
+                    # 请求成功但歌单确实为空
                     result[pl_id] = {
                         "title": pl_title,
                         "songs": [],
                         "fetched_at": datetime.now(CST).isoformat(timespec="seconds"),
                     }
-
-                fetched += 1
+                    fetched += 1
 
                 # 请求间隔（保持和全局一致）
                 from app.config import REQUEST_INTERVAL
@@ -149,27 +159,31 @@ class PlaylistSongFetcher:
                     time.sleep(REQUEST_INTERVAL)
 
             # 全部完成，写最终快照
-            self._save_progress(platform, uid, result, total, fetched, final=True)
+            self._save_progress(platform, uid, result, total, fetched, failed, final=True)
 
             with self._lock:
                 self._status[key]["fetched"] = fetched
+                self._status[key]["failed"] = failed
                 self._status[key]["current"] = ""
                 self._status[key]["complete"] = True
                 self._status[key]["running"] = False
 
-            print(f"[PlaylistFetcher] {platform}:{uid} 歌单歌曲拉取完成 ({fetched}/{total})")
+            print(f"[PlaylistFetcher] {platform}:{uid} 歌单歌曲拉取完成 "
+                  f"(成功 {fetched}, 失败 {failed}, 总计 {total})")
 
         except Exception as e:
             self._set_error(key, str(e))
 
     def _save_progress(self, platform: str, uid: str, result: dict,
-                       total: int, fetched: int, final: bool = False):
+                       total: int, fetched: int, failed: int = 0,
+                       final: bool = False):
         """将当前进度写入 DataStore"""
         try:
             self._store.save_snapshot(platform, uid, "playlist_songs", {
                 "playlists": result,
                 "total": total,
                 "fetched": fetched,
+                "failed": failed,
                 "fetching": not final,
             })
         except Exception as e:
