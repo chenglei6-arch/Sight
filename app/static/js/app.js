@@ -91,10 +91,16 @@
 					.then(function(d) {
 						if (d.code === 200) {
 							dataCache.netease = d.data;
-							lastFetchTime.netease = new Date();
+						} else {
+							dataCache.netease = { _errors: [d.message || "网易云请求失败"] };
 						}
+						lastFetchTime.netease = new Date();
 					})
-					.catch(function(e) { console.error("netease fetch error", e); })
+					.catch(function(e) {
+						console.error("netease fetch error", e);
+						dataCache.netease = { _errors: ["网易云网络请求失败，请检查网络或稍后重试"] };
+						lastFetchTime.netease = new Date();
+					})
 			);
 		}
 		if (targetUids.bilibili) {
@@ -104,10 +110,16 @@
 					.then(function(d) {
 						if (d.code === 200) {
 							dataCache.bilibili = d.data;
-							lastFetchTime.bilibili = new Date();
+						} else {
+							dataCache.bilibili = { _errors: [d.message || "B站请求失败，可能触发反爬虫机制"] };
 						}
+						lastFetchTime.bilibili = new Date();
 					})
-					.catch(function(e) { console.error("bilibili fetch error", e); })
+					.catch(function(e) {
+						console.error("bilibili fetch error", e);
+						dataCache.bilibili = { _errors: ["B站网络请求失败，请检查网络或稍后重试"] };
+						lastFetchTime.bilibili = new Date();
+					})
 			);
 		}
 
@@ -142,7 +154,7 @@
 
 		if (view === "timeline") {
 			var entries = dataCache.timeline;
-			if (!entries && targetUids.netease) {
+			if (!entries && (targetUids.netease || targetUids.bilibili)) {
 				// 缓存没数据，临时请求
 				container.innerHTML = '<div class="loading"><div class="spinner"></div>加载时间线...</div>';
 				fetchTimeline().then(function() { renderTimelineFromCache(); });
@@ -164,11 +176,15 @@
 						if (d.code === 200) {
 							dataCache[view] = d.data;
 							lastFetchTime[view] = new Date();
+						} else {
+							// API返回错误，构造带错误信息的缓存数据以便展示
+							dataCache[view] = { _errors: [d.message || "请求失败，可能触发反爬虫机制"] };
 						}
 						renderPlatformFromCache(view);
 					})
 					.catch(function() {
-						container.innerHTML = '<div class="error-banner">数据加载失败</div>';
+						dataCache[view] = { _errors: ["网络请求失败，请检查网络连接或稍后重试"] };
+						renderPlatformFromCache(view);
 					});
 				return;
 			}
@@ -184,6 +200,30 @@
 			container.innerHTML = '<div class="empty-state">暂无 ' + platform + ' 数据</div>';
 			return;
 		}
+		// 检查是否有模块拉取失败的警告
+		// 只有关键数据(profile)完全缺失时才显示红色错误横幅
+		// 部分模块失败时显示温和提示
+		var warningsHtml = "";
+		if (cached._errors && cached._errors.length) {
+			if (!cached.profile && !(cached.playlists && cached.playlists.length)) {
+				// 关键数据缺失：显示红色警告
+				warningsHtml = '<div class="error-banner" style="margin-bottom:12px;">';
+				warningsHtml += '<div style="font-weight:700;margin-bottom:4px;">⚠️ 数据获取失败</div>';
+				cached._errors.forEach(function(err) {
+					var msg = (platform === "bilibili") ? (err + "（B站反爬虫机制可能已触发）") : err;
+					warningsHtml += '<div style="font-size:12px;">' + escHtml(msg) + '</div>';
+				});
+				warningsHtml += '<div style="font-size:11px;margin-top:4px;opacity:0.7;">请稍后点击刷新重试</div>';
+				warningsHtml += '</div>';
+			} else {
+				// 有数据但部分模块失败：显示温和提示
+				var failedModules = cached._errors.map(function(e) { return e.split(":")[0]; }).join(", ");
+				warningsHtml = '<div class="error-banner" style="margin-bottom:12px;background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);color:#ffc107;">';
+				warningsHtml += '⚠️ 部分模块加载失败（' + escHtml(failedModules) + '），已展示已有数据。';
+				warningsHtml += ' <span style="font-size:11px;opacity:0.7;">可能是反爬虫限制，稍后会自动重试</span>';
+				warningsHtml += '</div>';
+			}
+		}
 		var profile = cached.profile;
 		var results = {
 			profile: { code: profile ? 200 : -1, data: profile },
@@ -195,7 +235,7 @@
 		};
 		if (profile) { updateMiniProfile(platform, profile); updatePlatformStatus(platform, true); }
 		else { updatePlatformStatus(platform, false); }
-		container.innerHTML = buildPlatformHTML(platform, profile, results);
+		container.innerHTML = warningsHtml + buildPlatformHTML(platform, profile, results);
 	}
 
 	function renderTimelineFromCache() {
@@ -203,7 +243,33 @@
 		if (!container) return;
 		var entries = dataCache.timeline;
 		if (!entries || !entries.length) {
-			container.innerHTML = '<div class="empty-state">暂无活动数据</div>';
+			// 显示更详细的空状态信息
+			var emptyH = '<div class="empty-state" style="padding:32px;">';
+			emptyH += '<div style="font-size:48px;margin-bottom:12px;">🕐</div>';
+			emptyH += '<div style="font-size:16px;font-weight:600;margin-bottom:8px;">暂无活动数据</div>';
+			emptyH += '<div style="font-size:12px;color:var(--text-muted);">';
+			var configured = [];
+			if (targetUids.netease) configured.push("网易云音乐");
+			if (targetUids.bilibili) configured.push("哔哩哔哩");
+			if (configured.length) {
+				emptyH += '已配置平台: ' + configured.join(", ") + '<br>';
+			}
+			// 检查各平台是否有缓存数据
+			var hasNeteaseData = dataCache.netease && (dataCache.netease.profile || (dataCache.netease.playlists && dataCache.netease.playlists.length));
+			var hasBilibiliData = dataCache.bilibili && (dataCache.bilibili.profile || (dataCache.bilibili.playlists && dataCache.bilibili.playlists.length));
+			if (hasNeteaseData || hasBilibiliData) {
+				emptyH += '平台数据已获取，但时间线快照对比暂无变化。';
+				emptyH += '<br>采集器运行后会自动生成时间线条目。';
+			} else {
+				emptyH += '请先确保平台数据能正常获取（点击 🔄 刷新）';
+				if (dataCache.bilibili && dataCache.bilibili._errors) {
+					emptyH += '<br><span style="color:var(--primary);">⚠ B站数据获取受阻，可能是反爬虫限制</span>';
+				}
+			}
+			emptyH += '</div>';
+			emptyH += '<button class="btn" style="margin-top:12px;" onclick="refreshCurrentView()">🔄 刷新所有数据</button>';
+			emptyH += '</div>';
+			container.innerHTML = emptyH;
 			return;
 		}
 

@@ -467,6 +467,7 @@ def platform_all(platform):
 
         if errors:
             detail = "partial: " + "; ".join(errors)
+            result["_errors"] = errors
             print(f"[{platform}] /all 部分数据加载失败: {'; '.join(errors)}")
 
         success = True

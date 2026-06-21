@@ -95,25 +95,21 @@ T1 (10:00) 采集快照          T2 (10:30) 采集快照
 └─────────────────┘          └─────────────────────┘
 ```
 
-**5 种可检测的变化类型：**
+**可检测的变化类型：**
 
 | 数据类型 | data_type | 检测内容 | 方法 |
 |---------|-----------|---------|------|
-| 听歌排行 | `records` | 新歌出现、播放次数增长 | `detect_record_changes()` |
-| 关注列表 | `follows` | 新关注、取关 | `detect_follow_changes()` |
-| 歌单列表 | `playlists` | 新建/收藏歌单、B站新投稿 | `detect_playlist_changes()` |
-| 歌单歌曲 | `playlist_songs` | 歌单内新增/移除歌曲 | `detect_playlist_song_changes()` |
+| 听歌排行 | `records` | 新歌出现(`new`)、播放次数增长(`increased`) | `detect_record_changes()` |
+| 关注列表 | `follows` | 新关注(`new_follow`)、取关(`unfollow`) | `detect_follow_changes()` |
+| 歌单列表 | `playlists` | 新建/收藏/删除歌单 | `detect_playlist_changes()` |
+| 歌单歌曲 | `playlist_songs` | 歌单内歌曲新增/移除 | `detect_playlist_song_changes()` |
 | 用户资料 | `profile` | 昵称/粉丝数等字段变化 | `compare_snapshots()` |
 
-**跨全历史追踪：** `detect_record_changes()` 不只对比最近 2 次快照，而是遍历全部历史快照（最多 500 条），追踪每首歌从首次出现到每次播放增长的全轨迹。
+**核心对比策略：**
 
-| change_type | 含义 | 时间信息 | 示例 |
-|------------|------|---------|------|
-| `new` | 最近两次快照间新出现 | 精确时间窗口 | `06.20 10:00 ~ 10:30` |
-| `increased` | 播放次数增长 | 精确时间窗口 | `06.20 10:00 ~ 10:30` |
-| `first_seen` | 在更早快照中首次出现 | 首次出现窗口 | `06.18 08:00 ~ 06.18 08:30` |
-| `ongoing` | 最早快照就已存在 | "至少从 XX 开始" | `⏳ 至少从 06.15 14:30 开始` |
-| `new_first` | 仅有一次快照 | "首次采集" | — |
+- **逐对累积**：不只看"第一个变化"，而是比较今天所有连续真实快照，累积每一次变化（如同一人关注→取关→再关注，三条事件全部捕获）
+- **时间窗口**：只对比「今天 00:00 至今」的快照（自然限制性能），若今天真实快照不足则向前追溯到最近一条
+- **听歌记录**：逐对比较连续快照中的每首歌，play_count 增长即产生 `increased` 事件，新出现的歌产生 `new` 事件。无法推断时间的数据（播放次数未变）不加入时间线
 
 ### 2. 平台适配器模式 (`app/platforms/`)
 
@@ -184,23 +180,33 @@ CREATE TABLE snapshots (
     platform    TEXT NOT NULL,      -- netease / bilibili
     uid         TEXT NOT NULL,      -- 用户 ID
     data_type   TEXT NOT NULL,      -- profile / playlists / records / events / follows / playlist_songs
-    data_json   TEXT NOT NULL,      -- JSON 数据
+    data_json   TEXT NOT NULL,      -- JSON 数据；标记快照格式 {"_marker": true, "_hash": "..."}
     created_at  TEXT NOT NULL       -- ISO 时间戳 (北京时间)
 );
 CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_at DESC);
+```
+
+**哈希去重优化：**
+
+`save_snapshot()` 保存前自动对数据内容计算 SHA256（排除 `_` 开头的元数据字段）。若与上一条同类型真实快照哈希相同 → 只存标记 `{"_marker": true}` 不存完整数据。变化检测方法通过 `_load_today_real_snapshots()` 自动跳过标记，只对比真实快照。
+
+```
+采集数据 → compute_hash(data)
+  ├─ hash == 上次 hash → INSERT {"_marker": true, "_hash": "abc..."}
+  └─ hash != 上次 hash → INSERT 完整 data + "_hash" 字段
 ```
 
 关键方法：
 
 | 方法 | 说明 |
 |------|------|
-| `save_snapshot(p, uid, type, data)` | 保存一份快照 |
+| `save_snapshot(p, uid, type, data)` | 保存快照（自动 hash 去重） |
 | `get_latest_snapshot(p, uid, type)` | 取最新快照 |
 | `get_snapshots(p, uid, type, since, limit)` | 取历史快照列表 |
-| `detect_record_changes(p, uid)` | 全历史听歌记录变化检测 |
-| `detect_follow_changes(p, uid)` | 关注/取关检测 |
-| `detect_playlist_changes(p, uid)` | 歌单/内容新增检测 |
-| `detect_playlist_song_changes(p, uid)` | 歌单内歌曲增减检测 |
+| `detect_record_changes(p, uid)` | 逐对比较今天 records 快照，累积所有 count 增长 |
+| `detect_follow_changes(p, uid)` | 逐对比较今天 follows 快照，累积所有关注/取关 |
+| `detect_playlist_changes(p, uid)` | 逐对比较今天 playlists 快照，累积所有歌单变化 |
+| `detect_playlist_song_changes(p, uid)` | 逐对比较今天 playlist_songs 快照，累积所有歌曲增减 |
 | `compare_snapshots(p, uid, type)` | 通用两快照对比 |
 | `clean_old_snapshots(days)` | 清理过期快照 |
 | `get_all_tracked_users()` | 所有追踪过的用户 |
@@ -211,19 +217,17 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 
 1. **动态**（events）：从快照读取，有精确时间戳
 2. **内容发布**（playlists）：B站投稿等，有创建时间（自动识别毫秒/秒格式）
-3. **听歌记录**（records）：快照对比推断，5 种 change_type，按时间窗口排序
-4. **关注变化**（follows）：快照对比，检测新关注和取关
-5. **歌单变化**（playlists 对比）：检测新建/收藏的歌单
-6. **歌单歌曲变化**（playlist_songs 对比）：检测歌单内新增/移除的歌曲
+3. **听歌记录**（records）：逐对比较今天快照，仅保留有精确时间窗口的（`new`/`increased`）
+4. **关注变化**（follows）：逐对比较今天快照，新关注/取关全部捕获
+5. **歌单变化**（playlists 对比）：逐对比较，检测新建/收藏/删除歌单
+6. **歌单歌曲变化**（playlist_songs 对比）：逐对比较，检测歌单内歌曲增减
 
-排序规则：`timestamp DESC`（最新在前），timestamp=0 的未知时间条目自然排到最后。
+排序规则：`timestamp DESC`（最新在前）。
 
 时间线 API 支持三种输出格式：
 - `?format=json`（默认）：结构化数据，前端渲染
 - `?format=text`：纯文本日志
 - `?format=markdown`：Markdown 格式
-
-时间格式：`YYYY.MM.DD HH:MM`（包含年份，支持跨年数据正确排序）。
 
 ### 6. 自动采集器 (`app/services/scheduler.py`)
 
@@ -349,11 +353,8 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 ### Q: 如何监控其他用户
 **A**: 在侧边栏输入框中输入用户 UID 或昵称，点击 🔍 搜索，从结果中选择目标用户。
 
-### Q: 时间线中听歌记录大量显示"时间未知"或"持续在听"
-**A**: 正常现象。需要**至少 2 次采集**才能开始推断时间窗口：
-- 第 1 次采集：建立基线，所有记录标记为"首次采集"
-- 第 2 次采集开始：对比发现新增歌曲 → 显示精确时间窗口
-- 一直存在的歌：显示"⏳ 至少从 XX 开始"
+### Q: 时间线中听歌记录为什么有些歌不显示
+**A**: 只有能推断出具体时间窗口的变化才加入时间线。需要**播放次数确实增长**或在两次采集间**新出现**的歌才会显示。播放次数一直不变的老歌不再出现，这是设计如此——无法推断你何时听了它。
 
 建议启动自动采集器，间隔设为 5-10 分钟以获得更精确的时间推断。
 

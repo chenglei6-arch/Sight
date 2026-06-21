@@ -112,30 +112,38 @@ class NeteaseAdapter(BasePlatformAdapter):
     # ==================== 歌单 ====================
 
     def get_content_lists(self, uid: str) -> list[ContentItem]:
-        resp = self._client.weapi_post("/weapi/user/playlist", {
-            "uid": uid,
-            "limit": 100,
-            "offset": 0,
-            "includeVideo": True,
-        })
-        playlists = resp.get("playlist", [])
+        """获取歌单列表（翻页直到没有更多）"""
         result = []
-        for pl in playlists:
-            result.append(ContentItem(
-                item_id=str(pl.get("id", "")),
-                title=pl.get("name", ""),
-                cover_url=pl.get("coverImgUrl", ""),
-                count=pl.get("trackCount", 0),
-                view_count=pl.get("playCount", 0),
-                creator=pl.get("creator", {}).get("nickname", ""),
-                description=(pl.get("description") or "")[:200],
-                is_owner=not pl.get("subscribed", False),
-                create_time=str(pl.get("createTime", "")),
-                extra={
-                    "subscribedCount": pl.get("subscribedCount", 0),
-                    "userId": str(pl.get("userId", "")),
-                },
-            ))
+        offset = 0
+        while True:
+            resp = self._client.weapi_post("/weapi/user/playlist", {
+                "uid": uid,
+                "limit": 100,
+                "offset": offset,
+                "includeVideo": True,
+            })
+            playlists = resp.get("playlist", [])
+            if not playlists:
+                break
+            for pl in playlists:
+                result.append(ContentItem(
+                    item_id=str(pl.get("id", "")),
+                    title=pl.get("name", ""),
+                    cover_url=pl.get("coverImgUrl", ""),
+                    count=pl.get("trackCount", 0),
+                    view_count=pl.get("playCount", 0),
+                    creator=pl.get("creator", {}).get("nickname", ""),
+                    description=(pl.get("description") or "")[:200],
+                    is_owner=not pl.get("subscribed", False),
+                    create_time=str(pl.get("createTime", "")),
+                    extra={
+                        "subscribedCount": pl.get("subscribedCount", 0),
+                        "userId": str(pl.get("userId", "")),
+                    },
+                ))
+            if not resp.get("more"):
+                break
+            offset += 100
         return result
 
     def get_content_detail(self, item_id: str) -> Optional[dict]:
@@ -203,13 +211,10 @@ class NeteaseAdapter(BasePlatformAdapter):
     # ==================== 动态 ====================
 
     def get_events(self, uid: str, limit: int = 30) -> list[EventItem]:
-        resp = self._client.weapi_post(f"/weapi/event/get/{uid}", {
-            "uid": uid,
-            "limit": limit,
-            "time": -1,
-            "getcounts": True,
-        })
-        events = resp.get("events", [])
+        """获取用户动态（时间游标翻页直到取够 limit 或没有更多）"""
+        result = []
+        cursor_time = -1
+        max_pages = 10
 
         type_map = {
             18: "分享", 19: "分享", 17: "分享",
@@ -218,66 +223,101 @@ class NeteaseAdapter(BasePlatformAdapter):
             24: "专栏",
         }
 
-        result = []
-        for ev in events:
-            info = ev.get("info", {})
-            json_data = {}
-            try:
-                json_data = json.loads(ev.get("json", "{}"))
-            except (json.JSONDecodeError, TypeError):
-                pass
+        for _ in range(max_pages):
+            resp = self._client.weapi_post(f"/weapi/event/get/{uid}", {
+                "uid": uid,
+                "limit": min(limit - len(result), 50),
+                "time": cursor_time,
+                "getcounts": True,
+            })
+            events = resp.get("events", [])
+            if not events:
+                break
 
-            media_title = ""
-            media_artist = ""
-            if "song" in json_data:
-                media_title = json_data["song"].get("name", "")
-                media_artist = ", ".join(
-                    a.get("name", "") for a in json_data["song"].get("artists", [])
-                )
-            elif "playlist" in json_data:
-                media_title = json_data["playlist"].get("name", "")
-                media_artist = json_data["playlist"].get("creator", {}).get("nickname", "")
+            for ev in events:
+                if len(result) >= limit:
+                    break
+                info = ev.get("info", {})
+                json_data = {}
+                try:
+                    json_data = json.loads(ev.get("json", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-            result.append(EventItem(
-                event_id=str(ev.get("id", "")),
-                event_type=type_map.get(info.get("type"), "动态"),
-                content=json_data.get("msg", ""),
-                timestamp=ev.get("eventTime", 0),
-                media_title=media_title,
-                media_artist=media_artist,
-                extra={"pics": info.get("pics", []), "actName": info.get("actName", "")},
-            ))
+                media_title = ""
+                media_artist = ""
+                if "song" in json_data:
+                    media_title = json_data["song"].get("name", "")
+                    media_artist = ", ".join(
+                        a.get("name", "") for a in json_data["song"].get("artists", [])
+                    )
+                elif "playlist" in json_data:
+                    media_title = json_data["playlist"].get("name", "")
+                    media_artist = json_data["playlist"].get("creator", {}).get("nickname", "")
+
+                result.append(EventItem(
+                    event_id=str(ev.get("id", "")),
+                    event_type=type_map.get(info.get("type"), "动态"),
+                    content=json_data.get("msg", ""),
+                    timestamp=ev.get("eventTime", 0),
+                    media_title=media_title,
+                    media_artist=media_artist,
+                    extra={"pics": info.get("pics", []), "actName": info.get("actName", "")},
+                ))
+
+            if len(result) >= limit or not resp.get("more"):
+                break
+            cursor_time = resp.get("lasttime", cursor_time)
+
         return result
 
     # ==================== 关注/粉丝 ====================
 
-    def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
-        resp = self._client.weapi_post(f"/weapi/user/getfollows/{uid}", {
-            "uid": uid, "limit": limit, "offset": 0, "order": True,
-        })
-        return [
-            {
-                "uid": str(f.get("userId", "")),
-                "nickname": f.get("nickname", ""),
-                "avatarUrl": f.get("avatarUrl", ""),
-                "signature": f.get("signature", ""),
-                "gender": f.get("gender", 0),
-            }
-            for f in resp.get("follow", [])
-        ]
+    def get_follows(self, uid: str, limit: int = 500) -> list[dict]:
+        """获取关注列表（翻页直到取够 limit 或没有更多）"""
+        all_follows = []
+        offset = 0
+        while len(all_follows) < limit:
+            resp = self._client.weapi_post(f"/weapi/user/getfollows/{uid}", {
+                "uid": uid, "limit": 100, "offset": offset, "order": True,
+            })
+            follows = resp.get("follow", [])
+            if not follows:
+                break
+            for f in follows:
+                all_follows.append({
+                    "uid": str(f.get("userId", "")),
+                    "nickname": f.get("nickname", ""),
+                    "avatarUrl": f.get("avatarUrl", ""),
+                    "signature": f.get("signature", ""),
+                    "gender": f.get("gender", 0),
+                })
+            if not resp.get("more"):
+                break
+            offset += 100
+        return all_follows[:limit]
 
-    def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
-        resp = self._client.weapi_post(f"/weapi/user/getfolloweds/{uid}", {
-            "userId": uid, "limit": limit, "offset": 0,
-            "time": "0", "getcounts": True,
-        })
-        return [
-            {
-                "uid": str(f.get("userId", "")),
-                "nickname": f.get("nickname", ""),
-                "avatarUrl": f.get("avatarUrl", ""),
-                "signature": f.get("signature", ""),
-                "gender": f.get("gender", 0),
-            }
-            for f in resp.get("followeds", [])
-        ]
+    def get_followers(self, uid: str, limit: int = 500) -> list[dict]:
+        """获取粉丝列表（翻页直到取够 limit 或没有更多）"""
+        all_followers = []
+        offset = 0
+        while len(all_followers) < limit:
+            resp = self._client.weapi_post(f"/weapi/user/getfolloweds/{uid}", {
+                "userId": uid, "limit": 100, "offset": offset,
+                "time": "0", "getcounts": True,
+            })
+            followers = resp.get("followeds", [])
+            if not followers:
+                break
+            for f in followers:
+                all_followers.append({
+                    "uid": str(f.get("userId", "")),
+                    "nickname": f.get("nickname", ""),
+                    "avatarUrl": f.get("avatarUrl", ""),
+                    "signature": f.get("signature", ""),
+                    "gender": f.get("gender", 0),
+                })
+            if not resp.get("more"):
+                break
+            offset += 100
+        return all_followers[:limit]

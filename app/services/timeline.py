@@ -219,21 +219,16 @@ class TimelineBuilder:
 
                     if record_changes.get("has_data"):
                         inferred = []
-                        unknown = []
                         for ch in record_changes["changes"]:
                             entry = cls._build_record_entry(platform_id, pname, ch)
-                            if entry.time_suffix == "时间未知":
-                                unknown.append(entry)
-                            else:
+                            # 只有能推断出具体时间窗口的才加入时间线
+                            if entry.time_range:
                                 inferred.append(entry)
 
-                        cls._quicksort(unknown, key=lambda e: e.raw.get("data", {}).get("new_count", 0), reverse=True)
-                        # 推断出的记录按时间倒序（最新在前，未知时间的在最后）
                         cls._quicksort(inferred, key=lambda e: e.timestamp, reverse=True)
                         entries.extend(inferred)
-                        entries.extend(unknown[:10])
-                        platform_count += len(inferred) + min(len(unknown), 10)
-                        print(f"[Timeline] {platform_id}:{uid} 听歌记录加入 {len(inferred)} 条推断 + {min(len(unknown), 10)} 条未知")
+                        platform_count += len(inferred)
+                        print(f"[Timeline] {platform_id}:{uid} 听歌记录加入 {len(inferred)} 条")
                 except Exception as e:
                     print(f"[Timeline] {platform_id} 记录对比失败: {e}")
 
@@ -342,9 +337,6 @@ class TimelineBuilder:
             elif change_type == "increased":
                 summary = f"[{pname}] {period_label}又在听《{song_name}》"
                 detail = f"播放 +{delta} 次（共 {new_count} 次）"
-            elif change_type == "first_seen":
-                summary = f"[{pname}] {period_label}首次检测到在听《{song_name}》"
-                detail = f"首次出现，已听 {new_count} 次"
             else:
                 summary = f"[{pname}] {period_label}在听《{song_name}》"
                 detail = f"已听 {new_count} 次"
@@ -369,6 +361,24 @@ class TimelineBuilder:
                         dt_first = datetime.fromisoformat(first_seen_time)
                         timestamp = int(dt_first.timestamp() * 1000)
                         time_str = ongoing_since
+                    except (ValueError, TypeError):
+                        pass
+
+            elif change_type == "first_seen":
+                # 更早快照中首次出现，但最近无变化 → 无法推断近期活动时间
+                first_seen_readable = cls._iso_to_readable(first_seen_time)
+                if first_seen_readable:
+                    time_suffix = f"⏳ 首次检测于 {first_seen_readable}"
+                else:
+                    time_suffix = "首次检测"
+                summary = f"[{pname}] {period_label}在听《{song_name}》"
+                detail = f"已听 {new_count} 次" if new_count > 0 else ""
+                # 用 first_seen_time 作为排序时间戳
+                if first_seen_time:
+                    try:
+                        dt_first = datetime.fromisoformat(first_seen_time)
+                        timestamp = int(dt_first.timestamp() * 1000)
+                        time_str = first_seen_readable
                     except (ValueError, TypeError):
                         pass
 

@@ -101,20 +101,26 @@ class BilibiliAdapter(BasePlatformAdapter):
                         time.sleep(1.5 + attempt)
                     continue
 
-                # 防御：B站可能返回空响应或 JSON null
+                # 防御：B站可能返回空响应或 JSON null（反爬虫特征）
                 raw_text = resp.text.strip() if resp.text else ""
                 if not raw_text or raw_text == "null":
-                    print(f"[B站] 空响应 (attempt {attempt+1})，等待重试... endpoint={endpoint}")
                     self._consecutive_rate_limits += 1
-                    time.sleep(min(3 + self._consecutive_rate_limits * 2, 20))
+                    if attempt >= 1:
+                        # 已重试过一次仍为空，疑似反爬虫，快速放弃
+                        print(f"[B站] 空响应持续，疑似反爬虫拦截，放弃 endpoint={endpoint}")
+                        return {}
+                    print(f"[B站] 空响应 (attempt {attempt+1})，短暂等待后重试... endpoint={endpoint}")
+                    time.sleep(min(2 + self._consecutive_rate_limits * 1.5, 10))
                     continue
 
                 data = resp.json()
                 # 防御：json() 可能返回 None（body 为 "null"）
                 if data is None or not isinstance(data, dict):
+                    if attempt >= 1:
+                        print(f"[B站] 非字典响应持续 type={type(data).__name__}，放弃 endpoint={endpoint}")
+                        return {}
                     print(f"[B站] 非字典响应 type={type(data).__name__} (attempt {attempt+1})，等待重试... endpoint={endpoint}")
-                    if attempt < MAX_RETRIES - 1:
-                        time.sleep(1.5)
+                    time.sleep(1.5)
                     continue
 
                 code = data.get("code")
@@ -235,30 +241,38 @@ class BilibiliAdapter(BasePlatformAdapter):
     # ==================== 投稿/收藏夹 ====================
 
     def get_content_lists(self, uid: str) -> list[ContentItem]:
-        """获取用户投稿列表"""
-        result = self._get("/x/space/arc/search", {
-            "mid": uid, "ps": 50, "pn": 1, "order": "pubdate",
-        })
-        videos = result.get("list", {}).get("vlist") or []
+        """获取用户投稿列表（翻页直到没有更多）"""
         items = []
-        for v in videos:
-            items.append(ContentItem(
-                item_id=str(v.get("aid", "")),
-                title=v.get("title", ""),
-                cover_url=v.get("pic", ""),
-                count=1,  # 视频数量
-                view_count=v.get("play", 0),
-                creator=v.get("author", ""),
-                description=v.get("description", "")[:200],
-                is_owner=True,
-                create_time=str(v.get("created", "")),
-                extra={
-                    "bvid": v.get("bvid", ""),
-                    "length": v.get("length", ""),
-                    "comment_count": v.get("comment", 0),
-                    "danmaku_count": v.get("video_review", 0),
-                },
-            ))
+        pn = 1
+        ps = 50
+        while True:
+            result = self._get("/x/space/arc/search", {
+                "mid": uid, "ps": ps, "pn": pn, "order": "pubdate",
+            })
+            videos = result.get("list", {}).get("vlist") or []
+            if not videos:
+                break
+            for v in videos:
+                items.append(ContentItem(
+                    item_id=str(v.get("aid", "")),
+                    title=v.get("title", ""),
+                    cover_url=v.get("pic", ""),
+                    count=1,
+                    view_count=v.get("play", 0),
+                    creator=v.get("author", ""),
+                    description=v.get("description", "")[:200],
+                    is_owner=True,
+                    create_time=str(v.get("created", "")),
+                    extra={
+                        "bvid": v.get("bvid", ""),
+                        "length": v.get("length", ""),
+                        "comment_count": v.get("comment", 0),
+                        "danmaku_count": v.get("video_review", 0),
+                    },
+                ))
+            if len(videos) < ps:
+                break
+            pn += 1
         return items
 
     def get_content_detail(self, item_id: str) -> Optional[dict]:
@@ -287,14 +301,10 @@ class BilibiliAdapter(BasePlatformAdapter):
     # ==================== 动态 ====================
 
     def get_events(self, uid: str, limit: int = 30) -> list[EventItem]:
-        """获取用户动态"""
-        result = self._get("/x/polymer/web-dynamic/v1/feed/space", {
-            "host_mid": uid,
-            "offset": "",
-        })
-
-        items = result.get("items") or []
+        """获取用户动态（游标翻页直到取够 limit 或没有更多）"""
         events = []
+        offset = ""
+        max_pages = 10  # 安全上限，防止无限翻页
 
         type_map = {
             "DYNAMIC_TYPE_AV": "投稿视频",
@@ -306,85 +316,121 @@ class BilibiliAdapter(BasePlatformAdapter):
             "DYNAMIC_TYPE_PGC": "追番/追剧",
         }
 
-        for item in items[:limit]:
-            mod = item.get("modules", {})
-            desc = mod.get("module_dynamic", {}).get("desc") or {}
-            stat = mod.get("module_stat", {})
-            author = mod.get("module_author", {})
+        for _ in range(max_pages):
+            result = self._get("/x/polymer/web-dynamic/v1/feed/space", {
+                "host_mid": uid,
+                "offset": offset,
+            })
 
-            # 提取文字内容
-            text_parts = desc.get("text", "") if isinstance(desc, dict) and isinstance(desc.get("text"), str) else ""
-            if not text_parts and isinstance(desc, dict) and isinstance(desc.get("rich_text_nodes"), list):
-                text_parts = "".join(
-                    n.get("orig_text", n.get("text", ""))
-                    for n in (desc.get("rich_text_nodes") or [])
-                )
+            items = result.get("items") or []
+            if not items:
+                break
 
-            # 提取关联内容
-            major = mod.get("module_dynamic", {}).get("major", {})
-            media_title = ""
-            media_type = ""
-            if major.get("archive"):
-                media_title = major["archive"].get("title", "")
-                media_type = "视频"
-            elif major.get("article"):
-                media_title = major["article"].get("title", "")
-                media_type = "专栏"
+            for item in items:
+                if len(events) >= limit:
+                    break
+                mod = item.get("modules", {})
+                desc = mod.get("module_dynamic", {}).get("desc") or {}
+                stat = mod.get("module_stat", {})
+                author = mod.get("module_author", {})
 
-            type_str = type_map.get(item.get("type", ""), item.get("type", "动态"))
+                # 提取文字内容
+                text_parts = desc.get("text", "") if isinstance(desc, dict) and isinstance(desc.get("text"), str) else ""
+                if not text_parts and isinstance(desc, dict) and isinstance(desc.get("rich_text_nodes"), list):
+                    text_parts = "".join(
+                        n.get("orig_text", n.get("text", ""))
+                        for n in (desc.get("rich_text_nodes") or [])
+                    )
 
-            pub_ts = author.get("pub_ts", 0)
-            try:
-                ts = int(pub_ts) * 1000 if pub_ts else 0
-            except (ValueError, TypeError):
-                ts = 0
+                # 提取关联内容
+                major = mod.get("module_dynamic", {}).get("major", {})
+                media_title = ""
+                if major.get("archive"):
+                    media_title = major["archive"].get("title", "")
+                elif major.get("article"):
+                    media_title = major["article"].get("title", "")
 
-            events.append(EventItem(
-                event_id=item.get("id_str", str(item.get("id", ""))),
-                event_type=type_str,
-                content=text_parts[:500],
-                timestamp=ts,
-                media_title=media_title,
-                media_artist=author.get("name", ""),
-                extra={
-                    "likes": stat.get("like", {}).get("count", 0),
-                    "comments": stat.get("comment", {}).get("count", 0),
-                    "forwards": stat.get("forward", {}).get("count", 0),
-                },
-            ))
+                type_str = type_map.get(item.get("type", ""), item.get("type", "动态"))
+
+                pub_ts = author.get("pub_ts", 0)
+                try:
+                    ts = int(pub_ts) * 1000 if pub_ts else 0
+                except (ValueError, TypeError):
+                    ts = 0
+
+                events.append(EventItem(
+                    event_id=item.get("id_str", str(item.get("id", ""))),
+                    event_type=type_str,
+                    content=text_parts[:500],
+                    timestamp=ts,
+                    media_title=media_title,
+                    media_artist=author.get("name", ""),
+                    extra={
+                        "likes": stat.get("like", {}).get("count", 0),
+                        "comments": stat.get("comment", {}).get("count", 0),
+                        "forwards": stat.get("forward", {}).get("count", 0),
+                    },
+                ))
+
+            if len(events) >= limit:
+                break
+
+            # 取下一页游标
+            next_offset = result.get("offset")
+            if not next_offset or next_offset == offset:
+                break
+            offset = next_offset
 
         return events
 
     # ==================== 关注/粉丝 ====================
 
-    def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
-        result = self._get("/x/relation/followings", {
-            "vmid": uid, "ps": min(limit, 50), "pn": 1,
-        })
-        follow_list = result.get("list") or []
-        return [
-            {
-                "uid": str(f.get("mid", "")),
-                "nickname": f.get("uname", ""),
-                "avatarUrl": f.get("face", ""),
-                "signature": f.get("sign", ""),
-                "gender": {"男": 1, "女": 2}.get(f.get("gender", ""), 0),
-            }
-            for f in follow_list
-        ]
+    def get_follows(self, uid: str, limit: int = 500) -> list[dict]:
+        """获取关注列表（翻页直到取够 limit 或没有更多，B站上限500）"""
+        all_follows = []
+        pn = 1
+        ps = 50  # B站单页最大 50
+        while len(all_follows) < limit:
+            result = self._get("/x/relation/followings", {
+                "vmid": uid, "ps": ps, "pn": pn,
+            })
+            follow_list = result.get("list") or []
+            if not follow_list:
+                break
+            for f in follow_list:
+                all_follows.append({
+                    "uid": str(f.get("mid", "")),
+                    "nickname": f.get("uname", ""),
+                    "avatarUrl": f.get("face", ""),
+                    "signature": f.get("sign", ""),
+                    "gender": {"男": 1, "女": 2}.get(f.get("gender", ""), 0),
+                })
+            if len(follow_list) < ps:
+                break
+            pn += 1
+        return all_follows[:limit]
 
-    def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
-        result = self._get("/x/relation/followers", {
-            "vmid": uid, "ps": min(limit, 50), "pn": 1,
-        })
-        follower_list = result.get("list") or []
-        return [
-            {
-                "uid": str(f.get("mid", "")),
-                "nickname": f.get("uname", ""),
-                "avatarUrl": f.get("face", ""),
-                "signature": f.get("sign", ""),
-                "gender": {"男": 1, "女": 2}.get(f.get("gender", ""), 0),
-            }
-            for f in follower_list
-        ]
+    def get_followers(self, uid: str, limit: int = 500) -> list[dict]:
+        """获取粉丝列表（翻页直到取够 limit 或没有更多，B站上限500）"""
+        all_followers = []
+        pn = 1
+        ps = 50
+        while len(all_followers) < limit:
+            result = self._get("/x/relation/followers", {
+                "vmid": uid, "ps": ps, "pn": pn,
+            })
+            follower_list = result.get("list") or []
+            if not follower_list:
+                break
+            for f in follower_list:
+                all_followers.append({
+                    "uid": str(f.get("mid", "")),
+                    "nickname": f.get("uname", ""),
+                    "avatarUrl": f.get("face", ""),
+                    "signature": f.get("sign", ""),
+                    "gender": {"男": 1, "女": 2}.get(f.get("gender", ""), 0),
+                })
+            if len(follower_list) < ps:
+                break
+            pn += 1
+        return all_followers[:limit]
