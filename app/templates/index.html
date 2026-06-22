@@ -17,12 +17,10 @@
   </div>
   <div class="header-right">
     <span id="collector-badge" style="font-size:11px;color:var(--text-muted);">采集器: 未启动</span>
-    <span id="fetch-songs-progress" style="font-size:11px;color:var(--warning);display:none;"></span>
     <span class="refresh-info" id="refresh-info">等待首次加载</span>
     <label class="toggle-wrap"><span>自动</span><label class="toggle"><input type="checkbox" id="auto-refresh"><span class="slider"></span></label></label>
     <button class="btn" id="refresh-btn" onclick="refreshCurrentView()">🔄 刷新</button>
     <button class="btn" onclick="collectOnce()">📸 采集</button>
-    <button class="btn" onclick="fetchAllPlaylistSongs()" id="fetch-songs-btn">🎵 拉取歌单详情</button>
   </div>
 </header>
 
@@ -60,6 +58,40 @@
         </div>
         <div class="pc-search-results" id="bilibili-results"></div>
         <div class="pc-profile-mini" id="bilibili-mini"></div>
+      </div>
+    </div>
+
+    <!-- 抖音 -->
+    <div class="nav-card" id="nav-douyin" data-view="douyin">
+      <div class="nav-card-header" onclick="switchView('douyin')">
+        <span class="pc-icon">🎵</span>
+        <span>抖音</span>
+        <span class="pc-status" id="douyin-status">●</span>
+      </div>
+      <div class="nav-card-body">
+        <div class="pc-input-row">
+          <input type="text" id="douyin-uid" placeholder="输入 sec_uid 或数字UID..." value="" onchange="onUidChange('douyin')">
+          <button onclick="searchAndSet('douyin')">🔍</button>
+        </div>
+        <div class="pc-search-results" id="douyin-results"></div>
+        <div class="pc-profile-mini" id="douyin-mini"></div>
+      </div>
+    </div>
+
+    <!-- QQ音乐 -->
+    <div class="nav-card" id="nav-qqmusic" data-view="qqmusic">
+      <div class="nav-card-header" onclick="switchView('qqmusic')">
+        <span class="pc-icon">🎶</span>
+        <span>QQ音乐</span>
+        <span class="pc-status" id="qqmusic-status">●</span>
+      </div>
+      <div class="nav-card-body">
+        <div class="pc-input-row">
+          <input type="text" id="qqmusic-uid" placeholder="输入 UIN (QQ号)..." value="" onchange="onUidChange('qqmusic')">
+          <button onclick="searchAndSet('qqmusic')">🔍</button>
+        </div>
+        <div class="pc-search-results" id="qqmusic-results"></div>
+        <div class="pc-profile-mini" id="qqmusic-mini"></div>
       </div>
     </div>
 
@@ -101,6 +133,6 @@
 <!-- Modal -->
 <div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-content"></div></div>
 
-<script src="{{ url_for('static', filename='js/app.js') }}?v=16"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=18"></script>
 </body>
 </html>

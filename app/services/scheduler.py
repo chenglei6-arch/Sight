@@ -124,6 +124,7 @@ class AutoCollector:
                     self._store.save_snapshot(platform_id, uid, "records", records_data)
 
                 # 采集关注列表
+                follows = []
                 try:
                     follows = adapter.get_follows(uid)
                     if follows:
@@ -135,6 +136,19 @@ class AutoCollector:
                 except Exception as e:
                     print(f"[Collector] {platform_id}:{uid} 关注采集失败: {e}")
 
+                # 采集粉丝列表
+                followers = []
+                try:
+                    followers = adapter.get_followers(uid)
+                    if followers:
+                        followers_data = {
+                            "count": len(followers),
+                            "items": followers,
+                        }
+                        self._store.save_snapshot(platform_id, uid, "followers", followers_data)
+                except Exception as e:
+                    print(f"[Collector] {platform_id}:{uid} 粉丝采集失败: {e}")
+
                 self._last_run[platform_id] = now_iso
 
                 entry = {
@@ -144,6 +158,7 @@ class AutoCollector:
                     "events_count": len(events) if events else 0,
                     "items_count": len(items) if items else 0,
                     "follows_count": len(follows) if follows else 0,
+                    "followers_count": len(followers) if followers else 0,
                     "success": True,
                 }
                 new_entries.append(entry)
@@ -151,7 +166,7 @@ class AutoCollector:
 
                 print(f"[Collector] {platform_id}:{uid} 采集完成 "
                       f"(动态{len(events) if events else 0}, 内容{len(items) if items else 0}, "
-                      f"关注{len(follows) if follows else 0})")
+                      f"关注{len(follows) if follows else 0}, 粉丝{len(followers) if followers else 0})")
 
             except Exception as e:
                 print(f"[Collector] {platform_id}:{uid} 采集失败: {e}")
@@ -166,6 +181,14 @@ class AutoCollector:
         if self.targets:
             try:
                 timeline = TimelineBuilder.build(self.targets, limit_per_platform=15)
+
+                # 持久化到数据库（自动去重）
+                try:
+                    inserted = self._store.insert_timeline_entries(timeline)
+                    print(f"[Collector] 时间线持久化: {inserted} 条新增")
+                except Exception as e:
+                    print(f"[Collector] 时间线持久化失败: {e}")
+
                 log_text = TimelineBuilder.build_log_text(timeline)
 
                 # 保存日志到文件

@@ -1,8 +1,12 @@
 # 视奸任何人
 
-实时采集网易云音乐、哔哩哔哩等多平台用户公开数据，生成统一活动时间线和数据报告。
-目前只支持这两个平台，以后会逐渐推广到其他平台上，比如抖音，qq，微信。
-你可以通过这个项目，获取某人的在所有你知道他在各平台的账号的实时动态来达到视奸效果。
+实时采集网易云音乐、哔哩哔哩、抖音、QQ音乐等多平台用户公开数据，生成统一活动时间线和数据报告。
+目前支持四个平台：网易云音乐、哔哩哔哩、抖音、QQ音乐。
+你可以通过这个项目，获取某人在所有你知道他在各平台的账号的实时动态来达到视奸效果。
+
+## 详细文档
+
+各平台适配器的详细说明、配置方法、API参考和常见问题请参见: [docs/platforms.md](docs/platforms.md)
 
 ## 快速启动
 
@@ -20,9 +24,7 @@ workshop13-sight/
 ├── run.py                          # 🚀 启动入口
 ├── requirements.txt                # Python 依赖
 ├── README.md                       # 本文档
-├── .gitignore                      # 根级忽略（/data/ 只忽略根级数据库目录）
-│
-├── cookie.txt                      # [旧] 原始 Cookie（可删除，已迁移到 credentials/）
+├── .gitignore                      # 根级忽略
 │
 ├── credentials/                    # 🔐 多平台凭证目录
 │   ├── netease_cookie.txt          #   网易云 Cookie
@@ -35,10 +37,15 @@ workshop13-sight/
 │   ├── timeline_20260620_223000.txt
 │   └── timeline_20260620_223000.json
 │
+├── docs/                           # 📖 文档
+│   └── platforms.md                #   平台适配器说明
+│
+├── reference/                      # 📚 参考源码/外部项目（gitignore）
+│   └── DouYin_Spider/              #   cv-cat/DouYin_Spider（本地参考副本）
+│
 └── app/                            # 📦 应用主包
     ├── __init__.py                 # Flask 应用工厂
     ├── config.py                   # 全局配置
-    ├── .gitignore                  # App 级忽略
     │
     ├── platforms/                  # 🔌 平台适配器层
     │   ├── __init__.py             #   适配器注册中心
@@ -47,7 +54,13 @@ workshop13-sight/
     │   │   ├── adapter.py          #     业务逻辑
     │   │   ├── client.py           #     HTTP 客户端 + 请求控制
     │   │   └── crypto.py           #     weapi AES+RSA 加密
-    │   └── bilibili/               #   哔哩哔哩适配器
+    │   ├── bilibili/               #   哔哩哔哩适配器
+    │   │   └── adapter.py          #     业务逻辑 + HTTP 客户端
+    │   ├── douyin/                 #   抖音适配器
+    │   │   ├── adapter.py          #     业务逻辑 + 凭证管理
+    │   │   └── ref_dy_apis/        #     参考 cv-cat/DouYin_Spider 实现
+    │   │       └── douyin_api.py   #       抖音 API 底层封装
+    │   └── qqmusic/                #   QQ音乐适配器
     │       └── adapter.py          #     业务逻辑 + HTTP 客户端
     │
     ├── credentials/                # 🔑 凭证管理器
@@ -91,6 +104,7 @@ T1 (10:00) 采集快照          T2 (10:30) 采集快照
 │  老歌  50次     │   对比   │  老歌  55次 (+5)     │ → 10:00~10:30 又听了
 │                 │   →     │  新歌  10次 (NEW)     │ → 10:00~10:30 开始听
 │ 关注: [A]       │          │ 关注: [A, B]          │ → 10:00~10:30 关注了B
+│ 粉丝: [C]       │          │ 粉丝: [C, D]          │ → 10:00~10:30 被D关注
 │ 歌单《X》: 3首  │          │ 歌单《X》: 4首        │ → 10:00~10:30 加入了1首
 └─────────────────┘          └─────────────────────┘
 ```
@@ -101,6 +115,7 @@ T1 (10:00) 采集快照          T2 (10:30) 采集快照
 |---------|-----------|---------|------|
 | 听歌排行 | `records` | 新歌出现(`new`)、播放次数增长(`increased`) | `detect_record_changes()` |
 | 关注列表 | `follows` | 新关注(`new_follow`)、取关(`unfollow`) | `detect_follow_changes()` |
+| 粉丝列表 | `followers` | 新粉丝(`new_follower`)、掉粉(`lost_follower`) | `detect_follower_changes()` |
 | 歌单列表 | `playlists` | 新建/收藏/删除歌单 | `detect_playlist_changes()` |
 | 歌单歌曲 | `playlist_songs` | 歌单内歌曲新增/移除 | `detect_playlist_song_changes()` |
 | 用户资料 | `profile` | 昵称/粉丝数等字段变化 | `compare_snapshots()` |
@@ -119,7 +134,7 @@ T1 (10:00) 采集快照          T2 (10:30) 采集快照
 |------|------|
 | `get_profile(uid)` | 获取用户资料 → `PlatformProfile` |
 | `search_user(keyword)` | 搜索用户 |
-| `get_content_lists(uid)` | 内容列表（歌单/投稿）→ `list[ContentItem]` |
+| `get_content_lists(uid)` | 内容列表（歌单/投稿/作品）→ `list[ContentItem]` |
 | `get_content_detail(id)` | 内容详情（含歌曲/视频列表） |
 | `get_history(uid, period)` | 播放/观看历史 → `list[MediaEntry]` |
 | `get_events(uid)` | 用户动态 → `list[EventItem]` |
@@ -154,6 +169,7 @@ T1 (10:00) 采集快照          T2 (10:30) 采集快照
    │                            │  读取全部历史快照            │
    │                            │  detect_record_changes()     │
    │                            │  detect_follow_changes()     │
+   │                            │  detect_follower_changes()   │
    │                            │  detect_playlist_changes()   │
    │                            │  detect_playlist_song_changes()
    │                            │  构建 TimelineEntry[]        │
@@ -177,9 +193,9 @@ SQLite 表结构：
 ```sql
 CREATE TABLE snapshots (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    platform    TEXT NOT NULL,      -- netease / bilibili
+    platform    TEXT NOT NULL,      -- netease / bilibili / douyin / qqmusic
     uid         TEXT NOT NULL,      -- 用户 ID
-    data_type   TEXT NOT NULL,      -- profile / playlists / records / events / follows / playlist_songs
+    data_type   TEXT NOT NULL,      -- profile / playlists / records / events / follows / followers / playlist_songs
     data_json   TEXT NOT NULL,      -- JSON 数据；标记快照格式 {"_marker": true, "_hash": "..."}
     created_at  TEXT NOT NULL       -- ISO 时间戳 (北京时间)
 );
@@ -205,6 +221,7 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 | `get_snapshots(p, uid, type, since, limit)` | 取历史快照列表 |
 | `detect_record_changes(p, uid)` | 逐对比较今天 records 快照，累积所有 count 增长 |
 | `detect_follow_changes(p, uid)` | 逐对比较今天 follows 快照，累积所有关注/取关 |
+| `detect_follower_changes(p, uid)` | 逐对比较今天 followers 快照，累积所有粉丝增减 |
 | `detect_playlist_changes(p, uid)` | 逐对比较今天 playlists 快照，累积所有歌单变化 |
 | `detect_playlist_song_changes(p, uid)` | 逐对比较今天 playlist_songs 快照，累积所有歌曲增减 |
 | `compare_snapshots(p, uid, type)` | 通用两快照对比 |
@@ -215,14 +232,15 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 
 `TimelineBuilder.build(platform_uids)` 合并多平台全部事件：
 
-1. **动态**（events）：从快照读取，有精确时间戳
-2. **内容发布**（playlists）：B站投稿等，有创建时间（自动识别毫秒/秒格式）
+1. **动态**（events）：从快照读取，有精确时间戳。抖音跳过此步（作品由内容列表代替，避免重复）
+2. **内容发布**（playlists/内容列表）：各平台作品/歌单/视频，有创建时间（自动识别毫秒/秒格式）
 3. **听歌记录**（records）：逐对比较今天快照，仅保留有精确时间窗口的（`new`/`increased`）
 4. **关注变化**（follows）：逐对比较今天快照，新关注/取关全部捕获
-5. **歌单变化**（playlists 对比）：逐对比较，检测新建/收藏/删除歌单
-6. **歌单歌曲变化**（playlist_songs 对比）：逐对比较，检测歌单内歌曲增减
+5. **粉丝变化**（followers）：逐对比较今天快照，新粉丝/掉粉全部捕获
+6. **歌单变化**（playlists 对比）：逐对比较，检测新建/收藏/删除
+7. **歌单歌曲变化**（playlist_songs 对比）：逐对比较，检测歌单内歌曲增减
 
-排序规则：`timestamp DESC`（最新在前）。
+每条推断事件带时间窗口 `{since, until}`，按 `until` 降序排列。
 
 时间线 API 支持三种输出格式：
 - `?format=json`（默认）：结构化数据，前端渲染
@@ -235,7 +253,7 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 
 - 可配置间隔（默认 30 分钟）
 - 遍历所有已配置 UID 的平台
-- 采集：profile → events → playlists → records → **follows**
+- 采集：profile → events → playlists → records → follows → **followers**
 - 每次采集保存快照到 SQLite
 - 自动生成时间线日志（.txt + .json）到 `logs/` 目录
 
@@ -257,7 +275,7 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/{platform}/all?uid=xxx` | 获取平台全部数据（含 follows 快照保存） |
+| GET | `/api/{platform}/all?uid=xxx` | 获取平台全部数据（含 follows/followers 快照保存） |
 
 ### 单数据接口
 
@@ -265,9 +283,9 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 |------|------|------|
 | GET | `/api/{platform}/profile?uid=xxx` | 用户资料 |
 | GET | `/api/{platform}/search?keyword=xxx` | 搜索用户 |
-| GET | `/api/{platform}/playlists?uid=xxx` | 内容列表（歌单/投稿） |
+| GET | `/api/{platform}/playlists?uid=xxx` | 内容列表（歌单/投稿/作品） |
 | GET | `/api/{platform}/playlist/{id}` | 内容详情（歌曲列表） |
-| GET | `/api/{platform}/records?uid=xxx` | 听歌排行 |
+| GET | `/api/{platform}/records?uid=xxx` | 听歌/观看排行 |
 | GET | `/api/{platform}/events?uid=xxx` | 用户动态 |
 | GET | `/api/{platform}/follows?uid=xxx` | 关注列表 |
 | GET | `/api/{platform}/followers?uid=xxx` | 粉丝列表 |
@@ -313,6 +331,15 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 |------|-----------------|
 | 网易云 | `MUSIC_U`、`__csrf` |
 | B站 | `SESSDATA`、`bili_jct`、`DedeUserID` |
+| 抖音 | `sessionid`、`sid_tt`、`uid_tt` |
+| QQ音乐 | `uin`、`skey`、`p_skey` (可选) |
+
+### 抖音凭证特殊说明
+
+抖音适配器使用了 **sign_token** 认证模式而非标准 Cookie：
+1. 参考 `credentials/README.md` 获取 sign_token
+2. 将 token 填写到 `credentials/douyin.json` 中
+3. 启动服务后访问面板，抖音卡片会显示连接状态
 
 ## 配置说明 (`app/config.py`)
 
@@ -342,6 +369,11 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 - 空响应 / null 响应防御性重试
 - **快照优先策略**：面板和 API 优先从本地 SQLite 读取，减少对 API 的调用
 
+### 抖音
+- API 接口参考 [cv-cat/DouYin_Spider](https://github.com/cv-cat/DouYin_Spider) 实现端点加密及签名
+- sign_token 认证模式，定时刷新
+- 请求间隔控制 + 限速保护
+
 ## 常见问题
 
 ### Q: B站数据显示"暂无投稿"
@@ -358,8 +390,8 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 
 建议启动自动采集器，间隔设为 5-10 分钟以获得更精确的时间推断。
 
-### Q: 如何检测关注变化
-**A**: 自动的。采集器每次运行都会保存 follows 快照，时间线自动对比并显示新关注/取关。
+### Q: 如何检测关注/粉丝变化
+**A**: 自动的。采集器每次运行都会保存关注列表和粉丝列表快照，时间线自动对比并显示新关注/取关/新粉丝/掉粉。
 
 ### Q: 如何检测歌单里新增了哪些歌
 **A**: 点击顶部「🎵 拉取歌单详情」按钮。后台会逐个拉取每个歌单的歌曲列表（保持 0.8s 间隔），进度实时可见。拉取 2 轮后，时间线会显示歌单内新增/移除的歌曲。
@@ -371,3 +403,7 @@ CREATE INDEX idx_snapshot_lookup ON snapshots(platform, uid, data_type, created_
 3. 在 `app/platforms/__init__.py` 注册
 4. 在 `app/credentials/__init__.py` 添加凭证文件映射
 5. 在 `app/templates/index.html` 侧边栏添加 `nav-card`
+
+## 致谢
+
+- **[cv-cat/DouYin_Spider](https://github.com/cv-cat/DouYin_Spider)** — 抖音 API 底层封装（`app/platforms/douyin/ref_dy_apis/douyin_api.py`）基本照搬自该项目。原项目采用 Apache-2.0 许可证。我们仅在兼容布尔类型 `has_more` 返回值、翻页数量控制和移除部分非必要的 protobuf 处理上做了少量修改，在此对原作者的贡献表示感谢。

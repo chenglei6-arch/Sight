@@ -450,10 +450,16 @@ def platform_all(platform):
         except Exception as e:
             errors.append(f"follows: {e}")
 
-        # 粉丝
+        # 粉丝（同时保存快照供变化检测）
         result["followers"] = []
         try:
-            result["followers"] = adapter.get_followers(uid)
+            followers_list = adapter.get_followers(uid)
+            result["followers"] = followers_list
+            if followers_list:
+                get_store().save_snapshot(platform, uid, "followers", {
+                    "count": len(followers_list),
+                    "items": followers_list,
+                })
         except Exception as e:
             errors.append(f"followers: {e}")
 
@@ -648,10 +654,12 @@ def unified_timeline():
       uids: 逗号分隔的 platform:uid 对，如 netease:5012722824,bilibili:3493284789881676
       limit: 每平台最多取多少条 (默认30)
       format: json | text | markdown (默认json)
+      source: live(默认) 实时对比快照 | stored 从持久化时间线读取
     """
     uids_param = request.args.get("uids", "")
     limit = int(request.args.get("limit", 30))
     fmt = request.args.get("format", "json")
+    source = request.args.get("source", "live")
 
     uid_map = {}
     if uids_param:
@@ -665,8 +673,59 @@ def unified_timeline():
 
     t0 = time.perf_counter()
     try:
+        # ---- 从持久化时间线读取 ----
+        if source == "stored":
+            all_rows = []
+            for platform_id, uid in uid_map.items():
+                rows = get_store().get_timeline_entries(
+                    platform=platform_id, uid=uid, limit=limit
+                )
+                all_rows.extend(rows)
+
+            # 按 created_at 倒序排列
+            all_rows.sort(key=lambda r: (r.get("created_at", ""), r.get("timestamp", 0)), reverse=True)
+            all_rows = all_rows[:limit]
+
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            uid_list = ",".join(f"{k}:{v}" for k, v in uid_map.items())
+            _log_fetch("GET /timeline", "multi", uid_list, True, elapsed_ms,
+                       f"{len(all_rows)} stored entries")
+
+            if fmt == "text":
+                lines = []
+                for r in all_rows:
+                    time_part = r.get("time_str", "") or r.get("time_suffix", "") or "----.--.--"
+                    line = f"{time_part}  {r.get('summary', '')}"
+                    if r.get("detail"):
+                        line += f"（{r.get('detail')}）"
+                    if r.get("time_suffix"):
+                        line += f"  [{r.get('time_suffix')}]"
+                    lines.append(line)
+                return _result({"timeline": "\n".join(lines)})
+            elif fmt == "markdown":
+                now = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
+                lines = ["# 📊 多平台活动时间线（历史）", "", f"生成时间: {now}", ""]
+                for r in all_rows:
+                    icon = {"netease": "🎵", "bilibili": "📺"}.get(r.get("platform", ""), "📌")
+                    time_part = r.get("time_str", "") or r.get("time_suffix", "") or "时间未知"
+                    line = f"- **{time_part}** {icon} {r.get('summary', '')}"
+                    if r.get("detail"):
+                        line += f"（{r.get('detail')}）"
+                    lines.append(line)
+                return _result({"timeline": "\n".join(lines)})
+            else:
+                return _result(all_rows)
+
+        # ---- 实时对比快照构建时间线（默认）----
         from app.services.timeline import TimelineBuilder
         entries = TimelineBuilder.build(uid_map, limit_per_platform=limit, store=get_store())
+
+        # 持久化到数据库（自动去重）
+        try:
+            inserted = get_store().insert_timeline_entries(entries)
+            print(f"[API /timeline] 时间线持久化: {inserted} 条新增")
+        except Exception as e:
+            print(f"[API /timeline] 时间线持久化失败: {e}")
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         uid_list = ",".join(f"{k}:{v}" for k, v in uid_map.items())
@@ -694,6 +753,40 @@ def unified_timeline():
         elapsed_ms = (time.perf_counter() - t0) * 1000
         uid_list = ",".join(f"{k}:{v}" for k, v in uid_map.items())
         _log_fetch("GET /timeline", "multi", uid_list, False, elapsed_ms, str(e))
+        return _error(str(e))
+
+
+# ==================== 时间线条目增删改 ====================
+
+@bp.route("/timeline/<int:entry_id>", methods=["PUT"])
+def update_timeline_entry(entry_id):
+    """更新时间线条目（summary / detail）"""
+    body = request.get_json(force=True, silent=True) or {}
+    summary = body.get("summary")
+    detail = body.get("detail")
+    if summary is None and detail is None:
+        return _error("请提供 summary 或 detail 字段", http_status=400)
+
+    try:
+        ok = get_store().update_timeline_entry(entry_id, summary=summary, detail=detail)
+        if ok:
+            return _result({"message": "更新成功", "id": entry_id})
+        else:
+            return _error("条目不存在或未变更", http_status=404)
+    except Exception as e:
+        return _error(str(e))
+
+
+@bp.route("/timeline/<int:entry_id>", methods=["DELETE"])
+def delete_timeline_entry(entry_id):
+    """删除时间线条目"""
+    try:
+        ok = get_store().delete_timeline_entry(entry_id)
+        if ok:
+            return _result({"message": "删除成功", "id": entry_id})
+        else:
+            return _error("条目不存在", http_status=404)
+    except Exception as e:
         return _error(str(e))
 
 
@@ -734,7 +827,7 @@ def collector_stop():
 
 @bp.route("/collector/collect", methods=["POST"])
 def collector_collect_once():
-    """手动触发一次采集"""
+    """手动触发一次采集（需先启动采集器设置 targets）"""
     from app.services.scheduler import get_collector
     c = get_collector()
     try:

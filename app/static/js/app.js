@@ -7,11 +7,12 @@
 	var REFRESH_SEC = 300; // 5 分钟
 	var refreshTimer = null;
 	var currentView = "netease";
-	var targetUids = { netease: "", bilibili: "" };
+	var targetUids = { netease: "", bilibili: "", douyin: "", qqmusic: "" };
+	var timelineSource = "live";  // "live" 实时对比 | "stored" 持久化历史
 
 	// 数据缓存
-	var dataCache = { netease: null, bilibili: null, timeline: null };
-	var lastFetchTime = { netease: null, bilibili: null, timeline: null };
+	var dataCache = { netease: null, bilibili: null, douyin: null, qqmusic: null, timeline: null };
+	var lastFetchTime = { netease: null, bilibili: null, douyin: null, qqmusic: null, timeline: null };
 
 	var $ = function(s) { return document.querySelector(s); };
 	var $$ = function(s) { return document.querySelectorAll(s); };
@@ -25,6 +26,8 @@
 				var parsed = JSON.parse(stored);
 				if (parsed.netease) targetUids.netease = parsed.netease;
 				if (parsed.bilibili) targetUids.bilibili = parsed.bilibili;
+				if (parsed.douyin) targetUids.douyin = parsed.douyin;
+				if (parsed.qqmusic) targetUids.qqmusic = parsed.qqmusic;
 			}
 		} catch(e) {}
 	}
@@ -38,6 +41,8 @@
 	function syncInputsFromUids() {
 		var ne = $("#netease-uid"); if (ne) ne.value = targetUids.netease || "";
 		var bl = $("#bilibili-uid"); if (bl) bl.value = targetUids.bilibili || "";
+		var dy = $("#douyin-uid"); if (dy) dy.value = targetUids.douyin || "";
+		var qq = $("#qqmusic-uid"); if (qq) qq.value = targetUids.qqmusic || "";
 	}
 
 	// ==================== Init ====================
@@ -49,7 +54,7 @@
 		loadUidsFromStorage();
 
 		// 2. 无 UID 时尝试从登录用户获取
-		if (!targetUids.netease || !targetUids.bilibili) {
+		if (!targetUids.netease || !targetUids.bilibili || !targetUids.douyin || !targetUids.qqmusic) {
 			try {
 				var resp = await fetch("/api/platforms");
 				var data = await resp.json();
@@ -66,7 +71,7 @@
 		saveUidsToStorage();
 
 		// 3. 启动时全量预加载所有平台数据
-		if (targetUids.netease || targetUids.bilibili) {
+		if (targetUids.netease || targetUids.bilibili || targetUids.douyin || targetUids.qqmusic) {
 			await fetchAllData();
 		}
 
@@ -123,6 +128,46 @@
 			);
 		}
 
+		if (targetUids.douyin) {
+			platformPromises.push(
+				fetch("/api/douyin/all?uid=" + targetUids.douyin)
+					.then(function(r) { return r.json(); })
+					.then(function(d) {
+						if (d.code === 200) {
+							dataCache.douyin = d.data;
+						} else {
+							dataCache.douyin = { _errors: [d.message || "抖音请求失败"] };
+						}
+						lastFetchTime.douyin = new Date();
+					})
+					.catch(function(e) {
+						console.error("douyin fetch error", e);
+						dataCache.douyin = { _errors: ["抖音网络请求失败，请检查网络或稍后重试"] };
+						lastFetchTime.douyin = new Date();
+					})
+			);
+		}
+
+		if (targetUids.qqmusic) {
+			platformPromises.push(
+				fetch("/api/qqmusic/all?uid=" + targetUids.qqmusic)
+					.then(function(r) { return r.json(); })
+					.then(function(d) {
+						if (d.code === 200) {
+							dataCache.qqmusic = d.data;
+						} else {
+							dataCache.qqmusic = { _errors: [d.message || "QQ音乐请求失败"] };
+						}
+						lastFetchTime.qqmusic = new Date();
+					})
+					.catch(function(e) {
+						console.error("qqmusic fetch error", e);
+						dataCache.qqmusic = { _errors: ["QQ音乐网络请求失败，请检查网络或稍后重试"] };
+						lastFetchTime.qqmusic = new Date();
+					})
+			);
+		}
+
 		// 等平台数据都写入 DB 后再拉时间线
 		await Promise.all(platformPromises);
 
@@ -136,9 +181,11 @@
 		var parts = [];
 		if (targetUids.netease) parts.push("netease:" + targetUids.netease);
 		if (targetUids.bilibili) parts.push("bilibili:" + targetUids.bilibili);
+		if (targetUids.douyin) parts.push("douyin:" + targetUids.douyin);
+		if (targetUids.qqmusic) parts.push("qqmusic:" + targetUids.qqmusic);
 		if (!parts.length) return;
 		try {
-			var resp = await fetch("/api/timeline?uids=" + encodeURIComponent(parts.join(",")) + "&limit=40");
+			var resp = await fetch("/api/timeline?uids=" + encodeURIComponent(parts.join(",")) + "&limit=40&source=" + timelineSource);
 			var result = await resp.json();
 			if (result.code === 200) {
 				dataCache.timeline = result.data || [];
@@ -154,14 +201,14 @@
 
 		if (view === "timeline") {
 			var entries = dataCache.timeline;
-			if (!entries && (targetUids.netease || targetUids.bilibili)) {
+			if (!entries && (targetUids.netease || targetUids.bilibili || targetUids.douyin)) {
 				// 缓存没数据，临时请求
 				container.innerHTML = '<div class="loading"><div class="spinner"></div>加载时间线...</div>';
 				fetchTimeline().then(function() { renderTimelineFromCache(); });
 				return;
 			}
 			renderTimelineFromCache();
-		} else if (view === "netease" || view === "bilibili") {
+		} else if (view === "netease" || view === "bilibili" || view === "douyin") {
 			var cached = dataCache[view];
 			if (!cached) {
 				var uid = targetUids[view];
@@ -210,7 +257,7 @@
 				warningsHtml = '<div class="error-banner" style="margin-bottom:12px;">';
 				warningsHtml += '<div style="font-weight:700;margin-bottom:4px;">⚠️ 数据获取失败</div>';
 				cached._errors.forEach(function(err) {
-					var msg = (platform === "bilibili") ? (err + "（B站反爬虫机制可能已触发）") : err;
+					var msg = (platform === "bilibili") ? (err + "（B站反爬虫机制可能已触发）") : (platform === "douyin") ? (err + "（抖音接口可能受限）") : err;
 					warningsHtml += '<div style="font-size:12px;">' + escHtml(msg) + '</div>';
 				});
 				warningsHtml += '<div style="font-size:11px;margin-top:4px;opacity:0.7;">请稍后点击刷新重试</div>';
@@ -251,6 +298,7 @@
 			var configured = [];
 			if (targetUids.netease) configured.push("网易云音乐");
 			if (targetUids.bilibili) configured.push("哔哩哔哩");
+				if (targetUids.douyin) configured.push("抖音");
 			if (configured.length) {
 				emptyH += '已配置平台: ' + configured.join(", ") + '<br>';
 			}
@@ -273,10 +321,14 @@
 			return;
 		}
 
-		var h = '<div class="section-title">🕐 多平台统一活动时间线 <span class="count">(' + entries.length + ' 条)</span></div>';
+		var h = '<div class="section-title">🕐 多平台统一活动时间线 <span class="count">(' + entries.length + ' 条)</span>' +
+			'<span style="margin-left:12px;font-size:11px;">' +
+			'<button class="btn tl-src-btn" style="font-size:10px;padding:3px 8px;' + (timelineSource === 'live' ? 'background:var(--primary);color:#fff;' : '') + '" onclick="switchTimelineSource(\'live\')">实时</button>' +
+			'<button class="btn tl-src-btn" style="font-size:10px;padding:3px 8px;margin-left:2px;' + (timelineSource === 'stored' ? 'background:var(--primary);color:#fff;' : '') + '" onclick="switchTimelineSource(\'stored\')">历史</button>' +
+			'</span></div>';
 		h += '<div class="card">';
 		var currentDate = "";
-		var icons = { netease: "🎵", bilibili: "📺" };
+		var icons = { netease: "🎵", bilibili: "📺", douyin: "🎶" };
 
 		for (var j = 0; j < entries.length; j++) {
 			var e = entries[j];
@@ -323,10 +375,25 @@
 			h += '<div class="tl-summary">' + escHtml(e.summary) + '</div>';
 			if (e.detail) h += '<div class="tl-detail">' + escHtml(e.detail) + '</div>';
 			if (suffixHtml) h += '<div class="tl-suffix">' + suffixHtml + '</div>';
+				// 历史模式下显示编辑/删除按钮
+				if (e.id && timelineSource === 'stored') {
+					h += '<div class="tl-actions" style="margin-top:6px;display:flex;gap:6px;">';
+					h += '<button class="btn" style="font-size:10px;padding:2px 8px;" onclick="event.stopPropagation();editTimelineEntry(' + e.id + ')">✏️ 编辑</button>';
+					h += '<button class="btn" style="font-size:10px;padding:2px 8px;color:var(--primary);" onclick="event.stopPropagation();deleteTimelineEntry(' + e.id + ')">🗑 删除</button>';
+					h += '</div>';
+				}
 			h += '</div></div>';
 		}
 		h += '</div>';
 		container.innerHTML = h;
+			// 绑定时间线源切换按钮事件
+			var srcBtns = container.querySelectorAll(".tl-src-btn");
+			for (var si = 0; si < srcBtns.length; si++) {
+				srcBtns[si].addEventListener("click", function() {
+					var src = this.getAttribute("data-source");
+					if (src) switchTimelineSource(src);
+				});
+			}
 	}
 
 	// ==================== View Switching ====================
@@ -345,14 +412,65 @@
 		});
 	};
 
+	// ==================== Timeline CRUD ====================
+	window.switchTimelineSource = function(source) {
+		timelineSource = source;
+		dataCache.timeline = null;  // 清除缓存，强制重新拉取
+		fetchTimeline().then(function() {
+			renderFromCache('timeline');
+		});
+	};
+
+	window.editTimelineEntry = function(entryId) {
+		// 从已渲染的 DOM 中找到对应条目
+		var newSummary = prompt('编辑摘要:', '');
+		if (newSummary === null) return;  // 用户取消
+		var newDetail = prompt('编辑详情（可留空）:', '');
+		if (newDetail === null) return;
+
+		fetch('/api/timeline/' + entryId, {
+			method: 'PUT',
+			headers: {'Content-Type': 'application/json'},
+			body: JSON.stringify({summary: newSummary, detail: newDetail}),
+		})
+			.then(function(r) { return r.json(); })
+			.then(function(d) {
+				if (d.code === 200) {
+					// 刷新当前时间线视图
+					dataCache.timeline = null;
+					fetchTimeline().then(function() { renderFromCache('timeline'); });
+				} else {
+					alert('编辑失败: ' + (d.message || '未知错误'));
+				}
+			})
+			.catch(function() { alert('编辑请求失败，请检查网络'); });
+	};
+
+	window.deleteTimelineEntry = function(entryId) {
+		if (!confirm('确定要删除这条时间线记录吗？此操作不可撤销。')) return;
+		fetch('/api/timeline/' + entryId, { method: 'DELETE' })
+			.then(function(r) { return r.json(); })
+			.then(function(d) {
+				if (d.code === 200) {
+					dataCache.timeline = null;
+					fetchTimeline().then(function() { renderFromCache('timeline'); });
+				} else {
+					alert('删除失败: ' + (d.message || '未知错误'));
+				}
+			})
+			.catch(function() { alert('删除请求失败，请检查网络'); });
+	};
+
 	window.onUidChange = function(platform) {
 		var input = document.getElementById(platform + "-uid");
 		if (input) {
-			targetUids[platform] = input.value.trim();
+			var val = input.value.trim();
+			if (val === targetUids[platform]) return; // 值未变，跳过（避免 mousedown/click 时序冲突）
+			targetUids[platform] = val;
 			saveUidsToStorage();
 			// 清除该平台缓存，触发重新拉取
 			dataCache[platform] = null;
-			if (currentView === platform) renderFromCache(platform);
+			if (val && currentView === platform) renderFromCache(platform);
 		}
 	};
 
@@ -379,7 +497,7 @@
 		}
 
 		var playlistData = (results.playlists.code === 200) ? results.playlists.data : [];
-		var contentLabel = platform === "netease" ? "歌单" : "投稿";
+		var contentLabel = platform === "netease" ? "歌单" : platform === "douyin" ? "作品" : "投稿";
 		h += '<div class="section-title">📋 ' + contentLabel + ' <span class="count">(' + (playlistData.length || 0) + ')</span></div>';
 		if (playlistData.length) {
 			h += '<div class="card-grid" style="margin-bottom:16px;">';
@@ -491,13 +609,17 @@
 				return;
 			}
 			results.innerHTML = data.data.map(function(u) {
-				var theUid = u.uid || u.userId || "";
-				return '<div class="sr-item" data-uid="' + theUid + '">' + escHtml(u.nickname) + ' <span style="color:var(--text-muted);">' + theUid + '</span></div>';
+				var theUid = u.sec_uid || u.uid || u.userId || "";
+				return '<div class="sr-item" data-uid="' + theUid + '">' + escHtml(u.nickname || "未知") + ' <span style="color:var(--text-muted);">' + (u.uid || "") + '</span></div>';
 			}).join("");
 			results.querySelectorAll(".sr-item").forEach(function(item) {
-				item.addEventListener("click", function() {
-					targetUids[platform] = item.dataset.uid;
+				// mousedown 在 blur/change 之前触发，提前设 input.value
+				// 修复 change(onUidChange) 在 click 之前触发的时序问题
+				item.addEventListener("mousedown", function() {
 					input.value = item.dataset.uid;
+					targetUids[platform] = item.dataset.uid;
+				});
+				item.addEventListener("click", function() {
 					saveUidsToStorage();
 					results.style.display = "none";
 					// 清除缓存，触发全量重新拉取
@@ -597,14 +719,74 @@
 	};
 
 	window.collectOnce = async function() {
-		try {
-			var resp = await fetch("/api/collector/collect", { method: "POST" });
+		var btn = event && event.target;
+		if (btn) { btn.disabled = true; btn.textContent = "⏳ 采集中..."; }
+
+		// 收集当前配置的 targets
+		var targets = {};
+		if (targetUids.netease) targets.netease = targetUids.netease;
+		if (targetUids.bilibili) targets.bilibili = targetUids.bilibili;
+		if (targetUids.douyin) targets.douyin = targetUids.douyin;
+		if (!Object.keys(targets).length) {
 			var log = $("#collector-log");
-			if (log) log.innerHTML += '<div style="color:var(--success);">✓ ' + new Date().toLocaleTimeString() + ' 采集完成</div>';
-			// 采集完后刷新缓存
-			await fetchAllData();
-			renderFromCache(currentView);
+			if (log) log.innerHTML += '<div style="color:var(--warning);">⚠ ' + new Date().toLocaleTimeString() + ' 请先配置 UID</div>';
+			if (btn) { btn.disabled = false; btn.textContent = "📸 采集"; }
+			return;
+		}
+
+		var logEl = $("#collector-log");
+		var wasRunning = false;
+		try {
+			var statusResp = await fetch("/api/collector/status");
+			var statusData = await statusResp.json();
+			wasRunning = !!(statusData.code === 200 && statusData.data && statusData.data.running);
 		} catch(e) {}
+
+		var interval = parseInt($("#collector-interval").value) || 30;
+
+		if (wasRunning) {
+			// 采集器已在运行：直接调用 collect_once（同步阻塞，含多页翻页）
+			try {
+				var resp = await fetch("/api/collector/collect", { method: "POST" });
+				var data = await resp.json();
+				if (data.code === 200) {
+					await fetchAllData();
+					renderFromCache(currentView);
+					if (logEl) logEl.innerHTML += '<div style="color:var(--success);">✓ ' + new Date().toLocaleTimeString() + ' 采集完成</div>';
+				} else {
+					if (logEl) logEl.innerHTML += '<div style="color:var(--primary);">✕ ' + new Date().toLocaleTimeString() + ' 采集失败: ' + (data.message || '') + '</div>';
+				}
+			} catch(e) {
+				if (logEl) logEl.innerHTML += '<div style="color:var(--primary);">✕ ' + new Date().toLocaleTimeString() + ' 采集失败</div>';
+			}
+		} else {
+			// 采集器未运行：启动采集器（后台线程立即执行首次 collect_once）
+			try {
+				var resp = await fetch("/api/collector/start", {
+					method: "POST", headers: {"Content-Type": "application/json"},
+					body: JSON.stringify({targets: targets, interval_minutes: interval}),
+				});
+				var data = await resp.json();
+				if (data.code === 200) {
+					// 后台线程已触发首次采集，稍等其完成
+					await new Promise(function(r) { setTimeout(r, 2000); });
+					await fetchAllData();
+					renderFromCache(currentView);
+					if (logEl) logEl.innerHTML += '<div style="color:var(--success);">✓ ' + new Date().toLocaleTimeString() + ' 采集完成</div>';
+					// 手动单次采集后自动停止后台线程
+					setTimeout(async function() {
+						await fetch("/api/collector/stop", { method: "POST" });
+						var badge = $("#collector-badge");
+						if (badge) { badge.textContent = "采集器: 未启动"; badge.style.color = "var(--text-muted)"; }
+					}, 500);
+				} else {
+					if (logEl) logEl.innerHTML += '<div style="color:var(--primary);">✕ ' + new Date().toLocaleTimeString() + ' 启动失败: ' + (data.message || '') + '</div>';
+				}
+			} catch(e) {
+				if (logEl) logEl.innerHTML += '<div style="color:var(--primary);">✕ ' + new Date().toLocaleTimeString() + ' 启动失败</div>';
+			}
+		}
+		if (btn) { btn.disabled = false; btn.textContent = "📸 采集"; }
 	};
 
 	// ==================== Modal & Auto Refresh ====================
@@ -622,7 +804,10 @@
 			// 延迟再清一次，防御浏览器异步恢复
 			setTimeout(function() { toggle.checked = false; }, 100);
 		}
-		$("#auto-refresh").addEventListener("change", function() { this.checked ? startAutoRefresh() : stopAutoRefresh(); });
+		// 延迟 800ms 再监听 change，跳过浏览器自动恢复表单触发的 change 事件
+		setTimeout(function() {
+			$("#auto-refresh").addEventListener("change", function() { this.checked ? startAutoRefresh() : stopAutoRefresh(); });
+		}, 800);
 	}
 	function startAutoRefresh() {
 		stopAutoRefresh();
@@ -650,6 +835,7 @@
 		var parts = [];
 		if (lastFetchTime.netease) parts.push("🎵 " + fmtTime(lastFetchTime.netease));
 		if (lastFetchTime.bilibili) parts.push("📺 " + fmtTime(lastFetchTime.bilibili));
+		if (lastFetchTime.douyin) parts.push("🎶 " + fmtTime(lastFetchTime.douyin));
 		if (parts.length) {
 			info.textContent = "上次更新: " + parts.join(" · ");
 		} else {
@@ -678,100 +864,6 @@
 	window.refreshCurrentView = function() {
 		fetchAllData().then(function() { renderFromCache(currentView); });
 	};
-
-	// ==================== 歌单歌曲异步拉取 ====================
-	var fetchSongsPollTimer = null;
-	var fetchSongsPlatforms = [];
-
-	window.fetchAllPlaylistSongs = function() {
-		// 收集所有有 UID 的平台
-		var platforms = [];
-		for (var p in targetUids) {
-			if (targetUids[p]) platforms.push(p);
-		}
-		if (!platforms.length) return;
-
-		fetchSongsPlatforms = platforms.slice();
-		var btn = document.getElementById("fetch-songs-btn");
-		if (btn) { btn.disabled = true; btn.textContent = "⏳ 拉取中..."; }
-		fetchNextPlatformSongs(0);
-	};
-
-	function fetchNextPlatformSongs(index) {
-		if (index >= fetchSongsPlatforms.length) {
-			// 全部完成
-			var btn = document.getElementById("fetch-songs-btn");
-			if (btn) { btn.disabled = false; btn.textContent = "🎵 拉取歌单详情"; }
-			var prog = document.getElementById("fetch-songs-progress");
-			if (prog) { prog.style.display = "none"; }
-			// 刷新时间线
-			fetchAllData().then(function() { renderFromCache(currentView); });
-			return;
-		}
-
-		var platform = fetchSongsPlatforms[index];
-		var uid = targetUids[platform];
-		var prog = document.getElementById("fetch-songs-progress");
-		if (prog) { prog.style.display = "inline"; prog.textContent = platform + " 歌单: 启动中..."; }
-
-		// 启动后台拉取
-		fetch("/api/" + platform + "/fetch-songs/start?uid=" + uid, { method: "POST" })
-			.then(function(r) { return r.json(); })
-			.then(function(d) {
-				if (d.code === 200) {
-					pollFetchSongs(platform, uid, index);
-				} else {
-					console.error("fetch-songs start failed:", d.message);
-					fetchNextPlatformSongs(index + 1);
-				}
-			})
-			.catch(function(e) {
-				console.error("fetch-songs start error:", e);
-				fetchNextPlatformSongs(index + 1);
-			});
-	}
-
-	function pollFetchSongs(platform, uid, platformIndex) {
-		if (fetchSongsPollTimer) clearTimeout(fetchSongsPollTimer);
-
-		fetch("/api/" + platform + "/fetch-songs/status?uid=" + uid)
-			.then(function(r) { return r.json(); })
-			.then(function(d) {
-				if (d.code !== 200) return;
-
-				var s = d.data;
-				var prog = document.getElementById("fetch-songs-progress");
-				if (s.complete) {
-					if (prog) prog.textContent = platform + " 歌单: ✓ 完成 (" + s.fetched + "/" + s.total + ")";
-					// 刷新当前视图（歌单列表会显示加载状态）
-					renderFromCache(currentView);
-					// 继续下一个平台
-					setTimeout(function() { fetchNextPlatformSongs(platformIndex + 1); }, 500);
-				} else if (s.running) {
-					var pct = s.total > 0 ? Math.round(s.fetched / s.total * 100) : 0;
-					if (prog) prog.textContent = platform + " 歌单: " + s.fetched + "/" + s.total + " (" + pct + "%) " + (s.current || "");
-					// 实时刷新视图 + 继续轮询
-					renderFromCache(currentView);
-					fetchSongsPollTimer = setTimeout(function() { pollFetchSongs(platform, uid, platformIndex); }, 2000);
-				} else {
-					// 已停止或有错误
-					if (prog && s.error) prog.textContent = platform + " 歌单: ✕ " + s.error;
-					fetchNextPlatformSongs(platformIndex + 1);
-				}
-			})
-			.catch(function(e) {
-				console.error("poll error:", e);
-				fetchNextPlatformSongs(platformIndex + 1);
-			});
-	}
-
-	// ==================== 歌单卡片加载状态 ====================
-	// 检查某个歌单的歌曲是否已拉取
-	function isPlaylistSongsFetched(platform, playlistId) {
-		// 从 timeline 或缓存中检查 playlist_songs 数据
-		// 简化: 始终返回 false 以显示加载中提示（实际由后台线程填充）
-		return false;
-	}
 
 	if (document.readyState === "loading") {
 		document.addEventListener("DOMContentLoaded", init);

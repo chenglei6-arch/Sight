@@ -39,6 +39,18 @@ def get_adapter(platform_id: str) -> Optional["BasePlatformAdapter"]:
         _registry[platform_id] = adapter
         return adapter
 
+    if platform_id == "douyin":
+        from app.platforms.douyin.adapter import DouyinAdapter
+        adapter = DouyinAdapter()
+        _registry[platform_id] = adapter
+        return adapter
+
+    if platform_id == "qqmusic":
+        from app.platforms.qqmusic.adapter import QQMusicAdapter
+        adapter = QQMusicAdapter()
+        _registry[platform_id] = adapter
+        return adapter
+
     return None
 
 

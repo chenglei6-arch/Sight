@@ -64,6 +64,28 @@ class DataStore:
                 CREATE INDEX IF NOT EXISTS idx_snapshot_lookup
                 ON snapshots(platform, uid, data_type, created_at DESC)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS timeline (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform         TEXT    NOT NULL,
+                    uid              TEXT    NOT NULL,
+                    event_type       TEXT    NOT NULL,
+                    timestamp        INTEGER DEFAULT 0,
+                    time_str         TEXT    DEFAULT '',
+                    time_suffix      TEXT    DEFAULT '',
+                    summary          TEXT    DEFAULT '',
+                    detail           TEXT    DEFAULT '',
+                    time_range_since TEXT    DEFAULT '',
+                    time_range_until TEXT    DEFAULT '',
+                    raw_json         TEXT    DEFAULT '{}',
+                    dedup_key        TEXT    NOT NULL UNIQUE,
+                    created_at       TEXT    NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_timeline_lookup
+                ON timeline(platform, uid, created_at DESC)
+            """)
             conn.commit()
 
     # ==================== 哈希计算 ====================
@@ -300,6 +322,141 @@ class DataStore:
             )
             conn.commit()
 
+    # ==================== 活动时间线持久化 ====================
+
+    def insert_timeline_entries(self, entries) -> int:
+        """
+        将时间线条目持久化到 timeline 表。
+        使用 INSERT OR IGNORE + UNIQUE(dedup_key) 避免重复加入。
+
+        Args:
+            entries: TimelineEntry 对象列表
+
+        Returns:
+            实际新插入的条目数
+        """
+        inserted = 0
+        now = _now_iso()
+        with self._connect() as conn:
+            for entry in entries:
+                dedup = entry.dedup_key()
+                time_range = getattr(entry, "time_range", {}) or {}
+                try:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO timeline
+                        (platform, uid, event_type, timestamp, time_str, time_suffix,
+                         summary, detail, time_range_since, time_range_until,
+                         raw_json, dedup_key, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            entry.platform,
+                            entry.uid,
+                            entry.event_type,
+                            entry.timestamp,
+                            entry.time_str,
+                            entry.time_suffix,
+                            entry.summary,
+                            entry.detail,
+                            time_range.get("since", ""),
+                            time_range.get("until", ""),
+                            json.dumps(entry.raw, ensure_ascii=False),
+                            dedup,
+                            now,
+                        ),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                        inserted += 1
+                except Exception as e:
+                    print(f"[DataStore] 时间线插入失败 ({dedup}): {e}")
+            conn.commit()
+        print(f"[DataStore] 时间线持久化: 收到 {len(entries)} 条，新增 {inserted} 条")
+        return inserted
+
+    def get_timeline_entries(
+        self,
+        platform: str = None,
+        uid: str = None,
+        event_type: str = None,
+        since: str = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """
+        查询持久化的时间线条目。
+
+        Args:
+            platform: 平台筛选（可选）
+            uid: 用户筛选（可选）
+            event_type: 事件类型筛选（可选）
+            since: ISO 时间，只返回此时间之后创建的条目
+            limit: 最大返回数
+            offset: 偏移量
+
+        Returns:
+            时间线条目列表（dict）
+        """
+        conditions = []
+        params = []
+        if platform:
+            conditions.append("platform=?")
+            params.append(platform)
+        if uid:
+            conditions.append("uid=?")
+            params.append(uid)
+        if event_type:
+            conditions.append("event_type=?")
+            params.append(event_type)
+        if since:
+            conditions.append("created_at >= ?")
+            params.append(since)
+
+        where = " AND ".join(conditions) if conditions else "1=1"
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM timeline WHERE {where} "
+                "ORDER BY created_at DESC, timestamp DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
+
+        return [dict(r) for r in rows]
+
+    def update_timeline_entry(
+        self, entry_id: int, summary: str = None, detail: str = None
+    ) -> bool:
+        """
+        更新时间线条目的 summary 和/或 detail。
+
+        Returns:
+            True 如果更新成功（存在该记录），False 如果记录不存在
+        """
+        updates = []
+        params = []
+        if summary is not None:
+            updates.append("summary=?")
+            params.append(summary)
+        if detail is not None:
+            updates.append("detail=?")
+            params.append(detail)
+        if not updates:
+            return False
+
+        params.append(entry_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE timeline SET {', '.join(updates)} WHERE id=?",
+                params,
+            )
+            conn.commit()
+            return conn.total_changes > 0
+
+    def delete_timeline_entry(self, entry_id: int) -> bool:
+        """删除一条时间线条目。返回 True 表示删除成功。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM timeline WHERE id=?", (entry_id,))
+            conn.commit()
+            return conn.total_changes > 0
+
     # ==================== 变化检测辅助 ====================
 
     def _load_today_real_snapshots(
@@ -489,6 +646,77 @@ class DataStore:
                 elif ch["period"] == "week":
                     groups[key] = ch
         return list(groups.values())
+
+    # ==================== 粉丝变化检测 ====================
+
+    def detect_follower_changes(
+        self, platform: str, uid: str
+    ) -> dict:
+        """
+        对比今天所有 followers 快照（逐对比较），累积每次粉丝增减变化。
+
+        Returns:
+            {
+                has_data, latest_time, previous_time,
+                changes: [{follower_uid, nickname, avatar, change_type, time_range}, ...]
+            }
+            change_type: "new_follower" | "lost_follower"
+        """
+        rows = self._load_today_real_snapshots(platform, uid, "followers")
+
+        if len(rows) < 2:
+            return {
+                "has_data": len(rows) > 0,
+                "changes": [],
+                "snapshots_count": len(rows),
+            }
+
+        changes = []
+        for i in range(len(rows) - 1):
+            older = json.loads(rows[i]["data_json"])
+            newer = json.loads(rows[i + 1]["data_json"])
+
+            older_items = older.get("items", [])
+            newer_items = newer.get("items", [])
+
+            older_uids = {str(f.get("uid", "")) for f in older_items}
+            newer_uids = {str(f.get("uid", "")) for f in newer_items}
+
+            if newer_uids == older_uids:
+                continue
+
+            newer_detail = {str(f.get("uid", "")): f for f in newer_items}
+            older_detail = {str(f.get("uid", "")): f for f in older_items}
+            time_range = {"since": rows[i]["created_at"], "until": rows[i + 1]["created_at"]}
+
+            for fuid in (newer_uids - older_uids):
+                user = newer_detail[fuid]
+                changes.append({
+                    "follower_uid": fuid,
+                    "nickname": user.get("nickname", ""),
+                    "avatar": user.get("avatarUrl", ""),
+                    "signature": user.get("signature", ""),
+                    "change_type": "new_follower",
+                    "time_range": time_range,
+                })
+
+            for fuid in (older_uids - newer_uids):
+                user = older_detail.get(fuid, {})
+                changes.append({
+                    "follower_uid": fuid,
+                    "nickname": user.get("nickname", "已离开用户"),
+                    "avatar": user.get("avatarUrl", ""),
+                    "signature": user.get("signature", ""),
+                    "change_type": "lost_follower",
+                    "time_range": time_range,
+                })
+
+        return {
+            "has_data": len(rows) > 0,
+            "latest_time": rows[-1]["created_at"],
+            "snapshots_count": len(rows),
+            "changes": changes,
+        }
 
     # ==================== 关注变化检测 ====================
 
