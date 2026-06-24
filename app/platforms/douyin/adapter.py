@@ -168,16 +168,18 @@ class DouyinAdapter(BasePlatformAdapter):
         if uid in self._user_cache:
             return self._user_cache[uid]
 
+        # 策略1: 通过 get_user_info API 查询
+        # get_user_info 已增强：对数字 UID 会自动添加 user_id 参数
         try:
-            # 策略1: 尝试作为 sec_uid 直接请求
             user_url = f"{self.BASE_URL}/user/{uid}"
             self._rate_limit()
             user_data = DouyinAPI.get_user_info(self.auth, user_url)
             user = user_data.get("user", {})
-            if user and user.get("uid"):
+            api_uid = user.get("uid")
+            if api_uid and user.get("nickname"):  # 有 uid 和昵称说明查询成功
                 info = {
-                    "uid": str(user.get("uid", "")),
-                    "sec_uid": user.get("sec_uid", uid),
+                    "uid": str(api_uid),
+                    "sec_uid": user.get("sec_uid") or uid,  # 可能没有 sec_uid，用原值兜底
                     "nickname": user.get("nickname", ""),
                     "avatar_url": self._extract_avatar_url(user),
                     "raw_user": user,
@@ -185,7 +187,7 @@ class DouyinAdapter(BasePlatformAdapter):
                 self._user_cache[uid] = info
                 return info
         except Exception as e:
-            print(f"[抖音] _resolve_user_info({uid}) API 失败: {e}")
+            print(f"[抖音] _resolve_user_info({uid}) get_user_info 请求失败: {e}")
 
         # 策略2: uid 是数字，检查是否是自己
         if uid.isdigit():
@@ -199,6 +201,7 @@ class DouyinAdapter(BasePlatformAdapter):
             except Exception:
                 pass
 
+        print(f"[抖音] _resolve_user_info({uid}) 解析失败")
         return None
 
     # ==================== Status ====================
@@ -263,14 +266,6 @@ class DouyinAdapter(BasePlatformAdapter):
         获取方法: 浏览器登录抖音 → F12 → Application → Cookies → 复制全部 douyin.com 的 Cookie。
         """
         try:
-            # 先检查搜索可用性（直接调用一次，检查是否有 verify_check）
-            check = DouyinAPI.search_user(self.auth, keyword, "0", "5")
-            nil_info = check.get("search_nil_info", {})
-            if nil_info.get("search_nil_type") == "verify_check":
-                print(f"[抖音] 搜索被抖音验证码拦截 (verify_check)")
-                print(f"[抖音] 请更新 credentials/douyin_cookie.txt（浏览器重新登录后复制全部 Cookie）")
-                return []
-
             users = DouyinAPI.search_some_user(self.auth, keyword, limit)
             results = []
             for u in users:
@@ -487,17 +482,8 @@ class DouyinAdapter(BasePlatformAdapter):
         注意: 抖音搜索 API 需要新鲜的 Cookie，否则会触发 verify_check 验证码。
         """
         try:
-            # 先检查搜索可用性
-            check = DouyinAPI.search_general_work(
-                self.auth, keyword, sort_type, publish_time, "0",
-                filter_duration, search_range, content_type
-            )
-            nil_info = check.get("search_nil_info", {})
-            if nil_info.get("search_nil_type") == "verify_check":
-                print(f"[抖音] 内容搜索被验证码拦截 (verify_check)")
-                print(f"[抖音] 请更新 credentials/douyin_cookie.txt（浏览器重新登录后复制全部 Cookie）")
-                return []
-
+            # 直接调 search_some_general_work，参考 DouYin_Spider spider_some_search_work
+            # search_some_general_work 内部已循环分页，无需额外 check 请求
             self._rate_limit()
             works = DouyinAPI.search_some_general_work(
                 self.auth, keyword, limit, sort_type, publish_time,
@@ -656,7 +642,7 @@ class DouyinAdapter(BasePlatformAdapter):
 
     # ==================== 关注/粉丝 ====================
 
-    def get_follows(self, uid: str, limit: int = 500) -> list[dict]:
+    def get_follows(self, uid: str, limit: int = 50) -> list[dict]:
         """
         获取关注列表 — 参考 DouYin_Spider: DouyinAPI.get_some_user_following_list
 
@@ -683,7 +669,7 @@ class DouyinAdapter(BasePlatformAdapter):
             print(f"[抖音] get_follows 失败: {e}")
             return []
 
-    def get_followers(self, uid: str, limit: int = 500) -> list[dict]:
+    def get_followers(self, uid: str, limit: int = 50) -> list[dict]:
         """
         获取粉丝列表 — 参考 DouYin_Spider: DouyinAPI.get_some_user_follower_list
         """

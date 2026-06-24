@@ -27,6 +27,7 @@ class CredentialManager:
     # 文件名别名（兼容不同拼写）
     PLATFORM_ALIASES = {
         "bilibili": ["billbill_cookie.txt", "bilibili_cookie.txt"],
+        "qqmusic": ["y.qq_cookie.txt"],
     }
 
     @classmethod
@@ -90,15 +91,15 @@ class CredentialManager:
 
     @classmethod
     def get_available_platforms(cls) -> list[dict]:
-        """获取所有已配置凭证的平台列表"""
+        """获取所有已配置凭证的平台列表（含别名检测）"""
         result = []
         for platform, filename in cls.PLATFORM_FILES.items():
-            path = CREDENTIALS_DIR / filename
+            path = cls.get_credential_path(platform)
             result.append({
                 "id": platform,
                 "name": cls._get_platform_name(platform),
-                "has_credential": path.exists(),
-                "credential_file": str(path),
+                "has_credential": path is not None and path.exists(),
+                "credential_file": str(path or CREDENTIALS_DIR / filename),
             })
         return result
 

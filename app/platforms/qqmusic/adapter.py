@@ -8,6 +8,7 @@ API 说明:
   - 需要 Referer: https://y.qq.com 防盗链
   - 返回 JSONP 格式 (需提取 callback)
   - g_tk 参数用于鉴权 (未登录=5381)
+  - QQ 音乐没有公开的按昵称搜索用户的 API
 
 数据结构:
   - 用户标识: uin (QQ 号)
@@ -73,8 +74,14 @@ class QQMusicAdapter(BasePlatformAdapter):
         if cookies:
             for key, value in cookies.items():
                 s.cookies.set(key, value)
-            # 从 Cookie 中计算 g_tk
-            skey = cookies.get("skey") or cookies.get("p_skey") or ""
+            # 从 Cookie 中计算 g_tk (新版本用 qqmusic_key/qm_keyst 代替了 skey)
+            skey = (
+                cookies.get("skey")
+                or cookies.get("p_skey")
+                or cookies.get("qqmusic_key")
+                or cookies.get("qm_keyst")
+                or ""
+            )
             self._g_tk = self._calc_g_tk(skey) if skey else 5381
 
         s.headers.update({
@@ -151,6 +158,59 @@ class QQMusicAdapter(BasePlatformAdapter):
                     time.sleep(1)
         return {}
 
+    def _api_post_json(self, path: str, json_body: dict = None) -> dict:
+        """
+        调用 QQ音乐 POST API (musicu.fcg 通用网关) 并返回 JSON
+
+        Args:
+            path: API 路径 (如 /cgi-bin/musicu.fcg)
+            json_body: POST JSON 请求体
+
+        Returns:
+            解析后的 JSON 字典, 失败返回 {}
+        """
+        url = f"https://u.y.qq.com{path}"
+        if json_body is None:
+            json_body = {}
+
+        # 注入公共参数
+        json_body.setdefault("comm", {})
+        json_body["comm"].setdefault("g_tk", self._g_tk)
+        # 从 session cookie 获取实际 uin (有登录就用真实 uin)
+        uin = 0
+        for c in self.session.cookies:
+            if c.name in ("uin", "qqmusic_uin"):
+                uin = int(c.value) if c.value.isdigit() else 0
+                break
+        json_body["comm"].setdefault("uin", uin)
+        json_body["comm"].setdefault("format", "json")
+        json_body["comm"].setdefault("ct", 24)
+        json_body["comm"].setdefault("cv", 0)
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                self._rate_limit()
+                resp = self.session.post(
+                    url,
+                    json=json_body,
+                    timeout=REQUEST_TIMEOUT,
+                )
+                if resp.status_code == 200:
+                    return self._parse_response(resp.text)
+                if resp.status_code in (429, 403):
+                    wait = 3 + attempt * 2
+                    print(f"[QQ音乐] HTTP {resp.status_code}, 等待 {wait}s...")
+                    time.sleep(wait)
+                    continue
+                print(f"[QQ音乐] HTTP {resp.status_code} path={path}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(1)
+            except requests.RequestException as e:
+                print(f"[QQ音乐] POST 请求异常: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(1)
+        return {}
+
     @staticmethod
     def _parse_response(text: str) -> dict:
         """
@@ -205,11 +265,10 @@ class QQMusicAdapter(BasePlatformAdapter):
             return False
         if not cookies:
             return False
-        try:
-            resp = self._api_get_json("/musichall/fcgi-bin/fcg_yqqhomepagerecommend.fcg")
-            return bool(resp and resp.get("code") == 0)
-        except Exception:
-            return False
+        # 检查是否有认证必需的字段
+        has_auth = bool(cookies.get("qqmusic_key") or cookies.get("qm_keyst") or cookies.get("skey") or cookies.get("p_skey"))
+        has_uin = bool(cookies.get("uin"))
+        return has_auth and has_uin
 
     def get_login_user(self) -> Optional[dict]:
         """获取当前登录用户信息"""
@@ -237,58 +296,91 @@ class QQMusicAdapter(BasePlatformAdapter):
 
     def search_user(self, keyword: str, limit: int = 20) -> list[dict]:
         """
-        搜索用户/歌手
+        搜索用户
 
-        QQ 音乐没有独立用户搜索, 以下为搜索策略:
-          1. 歌曲搜索 (可能返回歌手/用户)
-          2. 直接查询资料 (若 keyword 像 uin)
+        通过 QQ音乐通用 API 网关 (musicu.fcg) 的 search_type=8 搜索普通用户。
+        需要有效 Cookie 才能返回结果。
         """
-        users = []
+        # ---------- 策略1: musicu.fcg search_type=8 ----------
+        body = {
+            "music.search.SearchCgiService": {
+                "module": "music.search.SearchCgiService",
+                "method": "DoSearchForQQMusicDesktop",
+                "param": {
+                    "query": keyword,
+                    "search_type": 8,
+                    "page_num": 1,
+                    "num_per_page": min(limit, 40),
+                    "grp": 1,
+                    "remoteplace": "sizer.newclient.user",
+                },
+            }
+        }
+        try:
+            raw = self._api_post_json("/cgi-bin/musicu.fcg", body)
+        except Exception as e:
+            print(f"[QQ音乐] user search POST 失败: {e}")
+            raw = {}
 
-        # 策略1: 搜索 (使用 singer 搜索)
-        resp = self._api_get_json("/soso/fcgi-bin/client_search_cp", {
-            "w": keyword,
-            "t": 0,  # 0=综合, 1=歌手
-            "p": 1,
-            "n": min(limit, 20),
-            "cr": 1,
-            "newSearch": 1,
-        })
-        if resp:
-            data = resp.get("data", {})
-            # 歌手列表
-            singer = data.get("singer", {})
-            singer_list = singer.get("list", []) if isinstance(singer, dict) else []
-            for s in singer_list[:limit]:
-                mid = s.get("mid", "")
-                users.append({
-                    "uid": s.get("id", mid),
-                    "nickname": s.get("name", ""),
-                    "avatarUrl": (
-                        f"https://y.gtimg.cn/music/photo_new/T001R300x300M000{mid}.jpg"
-                        if mid else ""
-                    ),
-                    "signature": "",
-                    "gender": 0,
-                    "extra": {"type": "singer", "mid": mid},
-                })
+        if raw:
+            # 打印响应摘要便于调试
+            top_code = raw.get("code")
+            svc = raw.get("music.search.SearchCgiService", {})
+            svc_code = svc.get("code")
+            svc_data = svc.get("data", {})
+            svc_body = svc_data.get("body", {})
+            print(f"[QQ音乐] search resp: code={top_code} svc_code={svc_code} body_keys={list(svc_body.keys())}")
+            # 打印各分类的数量
+            for k in ("song", "singer", "album", "mv", "user", "zhida", "songlist"):
+                items = svc_body.get(k, {})
+                lst = items.get("list") if isinstance(items, dict) else (items if isinstance(items, list) else [])
+                print(f"  {k}: {len(lst)}")
 
-        # 策略2: 如果 keyword 像 QQ 号, 尝试直接查资料
-        if not users and keyword.isdigit():
+            # 从所有可能的字段提取用户
+            users = []
+            seen = set()
+            for field in ("user", "zhida", "singer"):
+                raw_data = svc_body.get(field, {})
+                entries = raw_data.get("list", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    uid = str(entry.get("uin") or entry.get("id") or entry.get("uid", ""))
+                    if not uid or uid in seen:
+                        continue
+                    seen.add(uid)
+                    nick = entry.get("nick") or entry.get("name") or entry.get("title", "")
+                    avatar = entry.get("avatar") or entry.get("headurl") or entry.get("pic", "")
+                    sign = entry.get("sign") or entry.get("signature") or entry.get("desc", "")
+                    users.append({
+                        "uid": uid,
+                        "nickname": nick,
+                        "avatarUrl": avatar,
+                        "signature": sign,
+                        "gender": entry.get("gender", 0),
+                        "extra": {"uin": uid},
+                    })
+
+            if users:
+                print(f"[QQ音乐] user search → {len(users)} users")
+                return users[:limit]
+
+        # ---------- 策略2: 纯数字 → 直接查 ----------
+        if keyword.isdigit():
             try:
                 profile = self.get_profile(keyword)
                 if profile:
-                    users.append({
+                    return [{
                         "uid": profile.uid,
                         "nickname": profile.nickname,
                         "avatarUrl": profile.avatar_url,
                         "signature": profile.signature,
                         "gender": profile.gender,
-                    })
+                    }]
             except Exception as e:
                 print(f"[QQ音乐] 直接查资料失败: {e}")
 
-        return users[:limit]
+        return []
 
     # ==================== 用户资料 ====================
 
@@ -404,31 +496,33 @@ class QQMusicAdapter(BasePlatformAdapter):
         获取用户的歌单列表 (创建 + 收藏)
 
         返回用户创建的歌单 (mydiss) 和收藏的歌单 (otherdiss)。
+        对歌手 ID 兜底返回 "热门歌曲" 列表。
         """
         items = []
         seen_ids = set()
 
         data = self._get_user_playlists_raw(uid)
-        if not data:
-            return items
+        if data:
+            # 用户创建的歌单
+            mydiss = data.get("mydiss", []) if isinstance(data, dict) else data
+            if isinstance(mydiss, list):
+                for diss in mydiss:
+                    item = self._build_content_item(diss, is_owner=True)
+                    if item and item.item_id not in seen_ids:
+                        seen_ids.add(item.item_id)
+                        items.append(item)
 
-        # 用户创建的歌单
-        mydiss = data.get("mydiss", []) if isinstance(data, dict) else data
-        if isinstance(mydiss, list):
-            for diss in mydiss:
-                item = self._build_content_item(diss, is_owner=True)
-                if item and item.item_id not in seen_ids:
-                    seen_ids.add(item.item_id)
-                    items.append(item)
+            # 用户收藏的歌单
+            otherdiss = data.get("otherdiss", []) if isinstance(data, dict) else []
+            if isinstance(otherdiss, list):
+                for diss in otherdiss:
+                    item = self._build_content_item(diss, is_owner=False)
+                    if item and item.item_id not in seen_ids:
+                        seen_ids.add(item.item_id)
+                        items.append(item)
 
-        # 用户收藏的歌单
-        otherdiss = data.get("otherdiss", []) if isinstance(data, dict) else []
-        if isinstance(otherdiss, list):
-            for diss in otherdiss:
-                item = self._build_content_item(diss, is_owner=False)
-                if item and item.item_id not in seen_ids:
-                    seen_ids.add(item.item_id)
-                    items.append(item)
+            if items:
+                return items
 
         return items
 
@@ -472,14 +566,15 @@ class QQMusicAdapter(BasePlatformAdapter):
 
     def get_content_detail(self, item_id: str) -> Optional[dict]:
         """
-        获取歌单详情 (含歌曲列表)
+        获取内容详情 (含歌曲列表)
 
         Args:
             item_id: 歌单 ID (dissid)
 
         Returns:
-            包含歌单信息和歌曲列表的字典
+            包含信息和歌曲列表的字典
         """
+        # 普通歌单
         resp = self._api_get_json("/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg", {
             "type": 1,
             "disstid": item_id,
@@ -595,14 +690,13 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         return events
 
-    # ==================== 社交 (占位) ====================
+    # ==================== 社交 ====================
 
     def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
         """
         获取关注列表
 
-        QQ 音乐没有公开的关注列表 API。
-        返回空列表。
+        QQ 音乐无公开的关注列表 API，返回空。
         """
         return []
 
@@ -610,7 +704,6 @@ class QQMusicAdapter(BasePlatformAdapter):
         """
         获取粉丝列表
 
-        QQ 音乐没有公开的粉丝列表 API。
-        返回空列表。
+        QQ 音乐无公开的粉丝列表 API，返回空。
         """
         return []

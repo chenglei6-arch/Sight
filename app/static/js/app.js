@@ -208,7 +208,7 @@
 				return;
 			}
 			renderTimelineFromCache();
-		} else if (view === "netease" || view === "bilibili" || view === "douyin") {
+		} else if (view === "netease" || view === "bilibili" || view === "douyin" || view === "qqmusic") {
 			var cached = dataCache[view];
 			if (!cached) {
 				var uid = targetUids[view];
@@ -328,7 +328,7 @@
 			'</span></div>';
 		h += '<div class="card">';
 		var currentDate = "";
-		var icons = { netease: "🎵", bilibili: "📺", douyin: "🎶" };
+		var icons = { netease: "🎵", bilibili: "📺", douyin: "🎶", qqmusic: "🎶" };
 
 		for (var j = 0; j < entries.length; j++) {
 			var e = entries[j];
@@ -465,7 +465,22 @@
 		var input = document.getElementById(platform + "-uid");
 		if (input) {
 			var val = input.value.trim();
-			if (val === targetUids[platform]) return; // 值未变，跳过（避免 mousedown/click 时序冲突）
+			if (val === targetUids[platform]) return;
+			// 抖音特殊处理：中文或非数字非sec_uid格式的内容视为搜索关键词，不设为UID
+			if (platform === "douyin" && val && !/^\d+$/.test(val) && !/^MS4wLjAB/.test(val)) {
+				var results = document.getElementById(platform + "-results");
+				if (results) results.style.display = "none";
+				return;
+			}
+			// QQ音乐特殊处理：只有纯数字 QQ号 才能设为 UID（搜到的结果带 QQ号，点击后自动填入）
+			if (platform === "qqmusic" && val && !/^\d+$/.test(val)) {
+				var results = document.getElementById(platform + "-results");
+				if (results) {
+					results.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">💡 按 Enter 搜索昵称，或在结果中点击选择用户</span>';
+					results.style.display = "block";
+				}
+				return;
+			}
 			targetUids[platform] = val;
 			saveUidsToStorage();
 			// 清除该平台缓存，触发重新拉取
@@ -497,7 +512,7 @@
 		}
 
 		var playlistData = (results.playlists.code === 200) ? results.playlists.data : [];
-		var contentLabel = platform === "netease" ? "歌单" : platform === "douyin" ? "作品" : "投稿";
+		var contentLabel = platform === "netease" || platform === "qqmusic" ? "歌单" : platform === "douyin" ? "作品" : "投稿";
 		h += '<div class="section-title">📋 ' + contentLabel + ' <span class="count">(' + (playlistData.length || 0) + ')</span></div>';
 		if (playlistData.length) {
 			h += '<div class="card-grid" style="margin-bottom:16px;">';
@@ -605,7 +620,12 @@
 			var resp = await fetch("/api/" + platform + "/search?keyword=" + encodeURIComponent(keyword));
 			var data = await resp.json();
 			if (data.code !== 200 || !data.data || !data.data.length) {
-				results.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">无结果</span>';
+				// QQ音乐搜索无结果
+				if (platform === "qqmusic" && keyword && !/^\d+$/.test(keyword)) {
+					results.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">未找到该用户，试试输入对方的 <b>QQ号 (UIN)</b></span>';
+				} else {
+					results.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">无结果</span>';
+				}
 				return;
 			}
 			results.innerHTML = data.data.map(function(u) {

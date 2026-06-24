@@ -124,7 +124,7 @@ class DouyinAPI:
                          auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         return json.loads(resp.text)
 
     @staticmethod
@@ -176,7 +176,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         resp_json = json.loads(resp.text)
         return resp_json
 
@@ -236,7 +236,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         resp_json = json.loads(resp.text)
         return resp_json
 
@@ -315,7 +315,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         resp_json = json.loads(resp.text)
         return resp_json
 
@@ -374,7 +374,11 @@ class DouyinAPI:
         params.add_param("channel", 'channel_pc_web')
         params.add_param("publish_video_strategy_type", '2')
         params.add_param("source", 'channel_pc_web')
-        params.add_param("sec_user_id", user_id)
+        # 数字 UID 使用 user_id 查询，否则使用 sec_user_id
+        if user_id.isdigit():
+            params.add_param("user_id", user_id)
+        else:
+            params.add_param("sec_user_id", user_id)
         params.add_param("personal_center_strategy", '1')
         params.add_param("update_version_code", '170400')
         params.add_param("pc_client_type", '1')
@@ -404,7 +408,7 @@ class DouyinAPI:
         params.add_param('fp', auth.cookie['s_v_web_id'])
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         return json.loads(resp.text)
 
     @staticmethod
@@ -471,7 +475,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         return json.loads(resp.text)
 
     @staticmethod
@@ -518,7 +522,7 @@ class DouyinAPI:
             res_json = DouyinAPI.search_user(auth, query, offset, count)
             users = res_json["user_list"]
             user_list.extend(users)
-            if not res_json.get("has_more") or len(user_list) >= num:
+            if res_json["has_more"] != 1 or len(user_list) >= num:
                 break
             offset = str(int(offset) + int(count))
         if len(user_list) > num:
@@ -584,7 +588,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         return resp.json()
 
     @staticmethod
@@ -641,7 +645,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         return resp.json()
 
     @staticmethod
@@ -721,7 +725,7 @@ class DouyinAPI:
         params.with_a_bogus()
         response = requests.get('https://www.douyin.com/aweme/v1/web/aweme/favorite/', params=params.get(),
                                 headers=headers.get(), cookies=auth.cookie,
-                                verify=False)
+                                verify=False, timeout=15)
         return response.json()
 
 
@@ -743,7 +747,7 @@ class DouyinAPI:
         params.add_param('verifyFp', auth.cookie['s_v_web_id'])
         params.add_param('fp', auth.cookie['s_v_web_id'])
         params.with_a_bogus()
-        resp = requests.get(url, params=params.get(), verify=False, headers=headers.get(), cookies=auth.cookie)
+        resp = requests.get(url, params=params.get(), verify=False, timeout=15, headers=headers.get(), cookies=auth.cookie)
         resp_json = json.loads(resp.text)
         return int(resp_json['user_uid'])
 
@@ -759,7 +763,7 @@ class DouyinAPI:
         params = {
             "from_tab_name": "main"
         }
-        response = requests.get(url, headers=headers.get(), cookies=auth.cookie, params=params)
+        response = requests.get(url, headers=headers.get(), cookies=auth.cookie, params=params, timeout=15)
         sec_uid = re.findall(r'\\"secUid\\":\\"(.*?)\\"', response.text)[0]
         return sec_uid
 
@@ -788,7 +792,7 @@ class DouyinAPI:
             "upgrade-insecure-requests": "1",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
         }
-        res = requests.get(url, headers=headers, cookies=auth_.cookie, verify=False)
+        res = requests.get(url, headers=headers, cookies=auth_.cookie, verify=False, timeout=15)
         ttwid = res.cookies.get_dict()['ttwid']
         soup = BeautifulSoup(res.text, 'html.parser')
         scripts = soup.select('script[nonce]')
@@ -871,7 +875,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         res = requests.post(f'{DouyinAPI.live_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                           params=params.get(), verify=False)
+                           params=params.get(), verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -956,7 +960,7 @@ class DouyinAPI:
         }
         params.with_a_bogus(data)
         res = requests.post(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+                            cookies=auth.cookie, data=data, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1012,7 +1016,7 @@ class DouyinAPI:
         }
         params.with_a_bogus(data)
         res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+                            cookies=auth.cookie, data=data, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1070,7 +1074,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, verify=False)
+                            cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1126,7 +1130,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, verify=False)
+                            cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1174,7 +1178,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1233,7 +1237,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1317,7 +1321,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1397,7 +1401,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1481,7 +1485,7 @@ class DouyinAPI:
         params.add_param("fp", auth.cookie['s_v_web_id'])
 
         res = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
 
@@ -1541,7 +1545,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         response = requests.get(url, headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
 
         print(response.text)
         print(response)
@@ -1588,7 +1592,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         res = requests.get(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
         return res.content
 
     @staticmethod
@@ -1620,7 +1624,7 @@ class DouyinAPI:
         }
         params.with_a_bogus(data)
         res = requests.post(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+                            cookies=auth.cookie, data=data, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1652,7 +1656,7 @@ class DouyinAPI:
         params.add_param("msToken", auth.msToken)
         params.with_a_bogus()
         res = requests.get(f'{DouyinAPI.live_url}{api}', headers=headers.get(), params=params.get(),
-                           cookies=auth.cookie, verify=False)
+                           cookies=auth.cookie, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1716,7 +1720,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         res = requests.post(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), params=params.get(),
-                            cookies=auth.cookie, data=data, verify=False)
+                            cookies=auth.cookie, data=data, verify=False, timeout=15)
         return res.json()
 
     @staticmethod
@@ -1737,7 +1741,7 @@ class DouyinAPI:
             headers=headers.get(),
             cookies=auth.cookie,
             data=requestProto.SerializeToString(),
-            verify=False
+            verify=False, timeout=15
         )
         responseProto = ResponseProto.Response()
         responseProto.ParseFromString(resp.content)
@@ -1775,7 +1779,7 @@ class DouyinAPI:
         query = splice_url(params)
         abogus = generate_a_bogus(query)
         params['a_bogus'] = abogus
-        resp = requests.post(url, params=params, headers=headers.get(), verify=False, cookies=auth.cookie,
+        resp = requests.post(url, params=params, headers=headers.get(), verify=False, timeout=15, cookies=auth.cookie,
                              data=requestProto.SerializeToString())
         responseProto = ResponseProto.Response()
         responseProto.ParseFromString(resp.content)
@@ -1803,7 +1807,7 @@ class DouyinAPI:
          .add_param('fp', auth.cookie['s_v_web_id'])
          .with_a_bogus()
          )
-        resp = requests.get(url, params=params.get(), verify=False, headers=headers.get(), cookies=auth.cookie)
+        resp = requests.get(url, params=params.get(), verify=False, timeout=15, headers=headers.get(), cookies=auth.cookie)
         resp_json = json.loads(resp.text)
         return resp_json['id']
 
@@ -1838,7 +1842,7 @@ class DouyinAPI:
             'type': digg_type,
         }
         resp = requests.post(url, params=params.get(), headers=headers.get(), cookies=auth.cookie, data=data,
-                             verify=False)
+                             verify=False, timeout=15)
         print(resp.text)
         resp_json = json.loads(resp.text)
         return resp_json['is_digg'] == 0
@@ -1942,7 +1946,7 @@ class DouyinAPI:
         params.add_param("verifyFp", auth.cookie['s_v_web_id'])
         params.add_param("fp", auth.cookie['s_v_web_id'])
         resp = requests.get(f'{DouyinAPI.douyin_url}{api}', headers=headers.get(), cookies=auth.cookie,
-                            params=params.get(), verify=False)
+                            params=params.get(), verify=False, timeout=15)
         search_id = resp.headers["X-Tt-Logid"]
         json_data = resp.json()
         return search_id, json_data["guide_search_words"], json_data

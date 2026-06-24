@@ -119,6 +119,7 @@ QQ 音乐的 API 主要集中在 `c.y.qq.com` 域名下：
 
 | API 端点 | 功能 | 是否需要登录 |
 |----------|------|-------------|
+| `u.y.qq.com/cgi-bin/musicu.fcg` | **用户搜索** (search_type=8) | 否 |
 | `rsc/fcgi-bin/fcg_get_profile_homepage.fcg` | 用户主页/歌单 | 否(基础) |
 | `qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg` | 歌单详情(含歌曲) | 否 |
 | `soso/fcgi-bin/client_search_cp` | 歌曲/歌手搜索 | 否 |
@@ -126,19 +127,20 @@ QQ 音乐的 API 主要集中在 `c.y.qq.com` 域名下：
 
 ### 关键机制
 
-1. **g_tk 鉴权**: 从 Cookie 的 `skey` 计算，未登录默认 `5381`
+1. **g_tk 鉴权**: 从 Cookie 的 `skey` / `p_skey` 计算，新版本使用 `qqmusic_key` / `qm_keyst` 代替，未登录默认 `5381`
 2. **防盗链**: 需要 `Referer: https://y.qq.com` 请求头
 3. **JSONP 处理**: 自动检测并解析 JSONP 格式响应
 4. **用户标识**: 使用 QQ 号 (`uin`) 作为用户 ID
+5. **通用网关**: `u.y.qq.com/cgi-bin/musicu.fcg` 统一 POST 网关，`comm` 块自动注入 `g_tk`、`uin`、`format` 等公共参数
 
 ### 主要方法
 
 | 方法 | 功能 | 备注 |
 |------|------|------|
-| `check_alive()` | 检查 Cookie 有效性 | 通过首页推荐 API |
+| `check_alive()` | 检查 Cookie 有效性 | 检测 cookie 字段 (qqmusic_key + uin) |
 | `get_login_user()` | 获取登录用户 | 从 Cookie 读取 uin |
 | `get_profile(uid)` | 获取用户资料 | 多策略: API → 歌单 → 页面 |
-| `search_user(keyword)` | 搜索用户/歌手 | 歌手搜索 + 直接查资料 |
+| `search_user(keyword)` | 搜索用户 | 通用网关 user search (search_type=8, 需 Cookie 登录态) + UIN 兜底 |
 | `get_content_lists(uid)` | 获取歌单列表 | 创建 + 收藏 |
 | `get_content_detail(item_id)` | 获取歌单详情 | 含完整歌曲列表 |
 | `get_history(uid)` | 听歌排行 | 累计统计 |
@@ -157,10 +159,12 @@ for pl in playlists:
 
 ### 已知限制
 
-1. **用户搜索**: QQ 音乐没有独立的用户搜索 API，仅支持歌手搜索
-2. **社交功能**: 关注/粉丝列表无公开 API
-3. **Cookie 依赖**: 获取私人歌单/听歌排行需要登录 Cookie
-4. **接口变动**: QQ 音乐可能更新 API 参数，需持续适配
+1. **社交功能**: 关注/粉丝列表无公开 API
+2. **Cookie 依赖**: 获取私人歌单/听歌排行需要登录 Cookie
+3. **用户搜索需要登录态**: `musicu.fcg` 网关搜索用户 (`search_type=8`) 需要有效 Cookie + 正确的 `g_tk`，匿名请求返回空
+4. **g_tk 计算**: Cookie 中 `qqmusic_key` / `qm_keyst` 是新版鉴权字段（替代 `skey`），适配器已支持自动检测
+5. **check_alive**: 使用 cookie 字段检测代替已废弃的首页推荐接口（原接口返回 HTTP 500）
+6. **接口变动**: QQ 音乐可能更新 API 参数，需持续适配
 
 ---
 
@@ -198,7 +202,7 @@ credentials/
 1. 浏览器打开 `https://y.qq.com/` 并登录
 2. F12 → Application → Cookies → `y.qq.com`
 3. 复制所有 Cookie 字符串
-4. 保存为 `credentials/qqmusic_cookie.txt`
+4. 保存为 `credentials/qqmusic_cookie.txt` 或 `credentials/y.qq_cookie.txt`（别名自动识别）
 
 ### 3. 启动服务
 
