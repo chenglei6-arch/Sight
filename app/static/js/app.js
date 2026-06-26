@@ -565,23 +565,59 @@
 
 		var followsData = (results.follows.code === 200) ? results.follows.data : [];
 		var followersData = (results.followers.code === 200) ? results.followers.data : [];
+		// QQ音乐 SSR 页面提供粉丝/关注数但可能无法获取详细列表
+		// 检测 _count_only 标记（encrypt_uin 用户的 SSR 统计数）
+		var followsCount = 0;
+		var followersCount = 0;
+		if (followsData.length === 1 && followsData[0]._count_only) {
+			followsCount = followsData[0].count || 0;
+		} else {
+			followsCount = followsData.length;
+		}
+		if (followersData.length === 1 && followersData[0]._count_only) {
+			followersCount = followersData[0].count || 0;
+		} else {
+			followersCount = followersData.length;
+		}
+		// 从 profile.extra 获取 SSR 粉丝数作为后备
+		var extraFansNum = profile && profile.extra ? (profile.extra.mFansNum || profile.extra.fans || 0) : 0;
+		if (!followersCount && extraFansNum) {
+			followersCount = extraFansNum;
+		}
 		h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">';
-		h += '<div><div class="section-title">👤 关注 (' + (followsData.length || 0) + ')</div>';
+		h += '<div><div class="section-title">👤 关注 (' + followsCount + ')</div>';
 		h += buildSocialList(followsData);
-		h += '</div><div><div class="section-title">👥 粉丝 (' + (followersData.length || 0) + ')</div>';
-		h += buildSocialList(followersData);
+		h += '</div><div><div class="section-title">👥 粉丝 (' + followersCount + ')</div>';
+		h += buildSocialList(followersData, followersCount > followersData.length);
 		h += '</div></div>';
 
 		return h;
 	}
 
-	function buildSocialList(list) {
-		if (!list || !list.length) return '<div class="empty-state">无</div>';
+	function buildSocialList(list, countOnly) {
+		if (!list || !list.length) {
+			if (countOnly) {
+				return '<div class="card" style="text-align:center;padding:12px;color:var(--text-muted);font-size:12px;">⏳ 粉丝列表暂不可用（QQ音乐 API 限制）</div>';
+			}
+			return '<div class="empty-state">无</div>';
+		}
 		var h = '<div class="card">';
 		list.slice(0, 15).forEach(function(u) {
+			// _count_only: SSR 统计数（encrypt_uin 用户无详细列表）
+			if (u._count_only) {
+				h += '<div class="follow-card" style="opacity:0.7;cursor:default;">';
+				h += '<div style="padding:8px 0;text-align:center;">';
+				h += '<div style="font-size:16px;font-weight:bold;">' + (u.count || '?') + '</div>';
+				h += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">' + escHtml(u.note || '详细列表不可获取') + '</div>';
+				h += '</div></div>';
+				return;
+			}
 			var av = u.avatarUrl || u.avatar_url || "";
 			var sig = u.signature || "";
-			h += '<div class="follow-card"><img src="' + escHtml(av) + '?param=60y60" loading="lazy">';
+			// 可点击跳转到该用户资料（仅对 QQ 音乐和 B 站等有效）
+			var clickUid = u.uid || u.uin || "";
+			var clickable = clickUid ? " style=\"cursor:pointer;\" onclick=\"navigateToUser('" + escHtml(currentView) + "','" + escHtml(clickUid) + "')\"" : '';
+			h += '<div class="follow-card"' + clickable + '><img src="' + escHtml(av) + '?param=60y60" loading="lazy">';
 			h += '<div class="f-info"><div class="f-name">' + escHtml(u.nickname) + '</div>';
 			if (sig) h += '<div class="f-sig">' + escHtml(sig) + '</div>';
 			h += '</div></div>';
@@ -589,7 +625,6 @@
 		h += '</div>';
 		return h;
 	}
-
 	function renderSongListHTML(songs) {
 		if (!songs || !songs.length) return '<div class="empty-state">暂无</div>';
 		var h = '<div class="card" style="margin-bottom:14px;">';
@@ -867,6 +902,187 @@
 		return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 	}
 
+	// ==================== QQ音乐 QR 扫码登录 ====================
+
+	var qrPollTimer = null;
+
+	window.startQrLogin = async function() {
+		var container = $("#view-content");
+		if (!container) return;
+
+		// 显示加载
+		container.innerHTML = '<div class="loading"><div class="spinner"></div>启动扫码登录...</div>';
+
+		try {
+			// 1) 通知后端启动 Playwright
+			var resp = await fetch("/api/qqmusic/qr-login/start", { method: "POST" });
+			var data = await resp.json();
+			if (data.code !== 200) {
+				container.innerHTML = '<div class="error-banner">启动失败: ' + escHtml(data.message) + '</div>';
+				return;
+			}
+
+			// 2) 开始轮询状态
+			showQrLoading(container);
+			startQrPolling(container);
+
+		} catch(e) {
+			container.innerHTML = '<div class="error-banner">扫码登录请求失败: ' + escHtml(e.message) + '</div>';
+		}
+	};
+
+	function showQrLoading(container) {
+		container.innerHTML = '<div class="loading"><div class="spinner"></div><div style="margin-top:12px;font-size:14px;">⏳ 等待 QR 码生成...</div></div>';
+	}
+
+	function showQrCode(container, base64img, isFullPage) {
+		var hint = isFullPage ? "⬆ 如果 QR 码不在图中，请点击「刷新 QR 码」" : "📱 请用手机 QQ 扫一扫登录";
+		container.innerHTML = '<div class="card" style="text-align:center;padding:20px;">' +
+			'<div style="font-size:16px;font-weight:600;margin-bottom:12px;">📱 QQ音乐 扫码登录</div>' +
+			'<img src="data:image/png;base64,' + base64img + '" style="max-width:280px;width:100%;border-radius:8px;border:2px solid var(--border);">' +
+			'<div style="margin-top:10px;font-size:12px;color:var(--text-muted);">' + hint + '</div>' +
+			'<div id="qr-status-text" style="margin-top:8px;font-size:13px;color:var(--text-secondary);">等待扫码...</div>' +
+			'<div style="margin-top:12px;display:flex;gap:8px;justify-content:center;">' +
+			'<button class="btn" onclick="startQrLogin()" style="font-size:11px;">🔄 刷新 QR 码</button>' +
+			'<button class="btn" onclick="stopQrLogin()" style="font-size:11px;color:var(--primary);">✕ 取消</button>' +
+			'</div></div>';
+	}
+
+	function showQrFollowResult(container, followData) {
+		if (!followData) {
+			container.innerHTML = '<div class="error-banner">登录成功，但获取关注列表失败</div>';
+			return;
+		}
+
+		var follows = followData.follows || [];
+		var count = followData.count || follows.length;
+
+		var h = '<div class="card" style="margin-bottom:16px;">' +
+			'<div style="display:flex;align-items:center;gap:12px;">' +
+			'<div style="font-size:28px;">✅</div>' +
+			'<div><div style="font-size:16px;font-weight:600;">QQ音乐扫码登录成功</div>' +
+			'<div style="font-size:12px;color:var(--text-muted);">已获取 ' + count + ' 个关注</div></div>' +
+			'<div style="margin-left:auto;"><button class="btn" onclick="stopQrLogin()" style="font-size:11px;">✕ 关闭</button></div>' +
+			'</div></div>';
+
+		if (count > 0) {
+			h += '<div class="section-title">👤 关注列表 (' + count + ')</div>';
+			h += '<div class="card">';
+			follows.forEach(function(u) {
+				var av = u.avatarUrl || u.avatar_url || "";
+				var sig = u.signature || "";
+				h += '<div class="follow-card">';
+				if (av) h += '<img src="' + escHtml(av) + '?param=60y60" loading="lazy">';
+				else h += '<div style="width:40px;height:40px;border-radius:50%;background:var(--bg);flex-shrink:0;"></div>';
+				h += '<div class="f-info">';
+				h += '<div class="f-name">' + escHtml(u.nickname) + '</div>';
+				if (sig) h += '<div class="f-sig">' + escHtml(sig) + '</div>';
+				h += '</div></div>';
+			});
+			h += '</div>';
+		} else {
+			// 如果 DOM 没抓到，显示页面文本供调试
+			h += '<div class="section-title">👤 关注列表</div>';
+			h += '<div class="empty-state">未从页面提取到关注列表数据</div>';
+			if (followData.all_text_lines && followData.all_text_lines.length) {
+				h += '<details><summary style="cursor:pointer;font-size:11px;color:var(--text-muted);">📄 查看页面原始文本</summary>';
+				h += '<pre style="font-size:10px;max-height:300px;overflow-y:auto;background:var(--bg);padding:8px;border-radius:6px;margin-top:6px;">';
+				followData.all_text_lines.forEach(function(line) {
+					h += escHtml(line) + '\n';
+				});
+				h += '</pre></details>';
+			}
+		}
+
+		container.innerHTML = h;
+	}
+
+	function showQrError(container, errMsg) {
+		container.innerHTML = '<div class="error-banner" style="text-align:center;padding:20px;">' +
+			'<div style="font-size:28px;margin-bottom:8px;">❌</div>' +
+			'<div style="font-weight:600;margin-bottom:6px;">扫码登录失败</div>' +
+			'<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">' + escHtml(errMsg || "未知错误") + '</div>' +
+			'<button class="btn" onclick="startQrLogin()">🔄 重试</button>' +
+			'</div>';
+	}
+
+	function startQrPolling(container) {
+		// 清除旧轮询
+		if (qrPollTimer) {
+			clearInterval(qrPollTimer);
+			qrPollTimer = null;
+		}
+
+		qrPollTimer = setInterval(async function() {
+			try {
+				var resp = await fetch("/api/qqmusic/qr-login/status");
+				var data = await resp.json();
+				if (data.code !== 200) return;
+
+				var status = data.data;
+				var st = status.status;
+
+				if (st === "qr_ready") {
+					// QR 码已就绪
+					if (status.qr_code) {
+						showQrCode(container, status.qr_code);
+					}
+				} else if (st === "logged_in") {
+					// 已登录，等抓取完成
+					var msg = "✅ 登录成功！";
+					if (status.login_seconds > 0) msg += " (用时 " + status.login_seconds + " 秒)";
+					msg += "<br><span style='font-size:12px;color:var(--text-muted);'>正在获取关注列表...</span>";
+					container.innerHTML = '<div class="loading"><div class="spinner"></div><div style="margin-top:12px;font-size:14px;">' + msg + '</div></div>';
+				} else if (st === "fetching") {
+					// 正在抓取
+					container.innerHTML = '<div class="loading"><div class="spinner"></div>' +
+						'<div style="margin-top:12px;font-size:14px;">✅ 登录成功！正在获取关注列表...</div></div>';
+				} else if (st === "done") {
+					// 完成！
+					clearInterval(qrPollTimer);
+					qrPollTimer = null;
+					if (status.follow_data && status.follow_data.count > 0) {
+						showQrFollowResult(container, status.follow_data);
+					} else if (status.follow_data) {
+						// 有 follow_data 但 count=0
+						if (status.follow_data.follows && status.follow_data.follows.length > 0) {
+							showQrFollowResult(container, status.follow_data);
+						} else {
+							container.innerHTML = '<div class="card" style="text-align:center;padding:20px;">' +
+								'<div style="font-size:28px;margin-bottom:8px;">📭</div>' +
+								'<div style="font-size:16px;font-weight:600;margin-bottom:4px;">关注列表为空</div>' +
+								'<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;">该用户没有关注任何人或关注列表不可见</div>' +
+								'<button class="btn" onclick="stopQrLogin()" style="font-size:11px;">✕ 关闭</button></div>';
+						}
+					} else {
+						showQrError(container, "未获取到关注数据");
+					}
+				} else if (st === "error") {
+					clearInterval(qrPollTimer);
+					qrPollTimer = null;
+					showQrError(container, status.error);
+				}
+				// st === "starting" - still waiting for QR, do nothing
+
+			} catch(e) {
+				console.error("QR poll error", e);
+			}
+		}, 2000);
+	}
+
+	window.stopQrLogin = async function() {
+		if (qrPollTimer) {
+			clearInterval(qrPollTimer);
+			qrPollTimer = null;
+		}
+		try {
+			await fetch("/api/qqmusic/qr-login/stop", { method: "POST" });
+		} catch(e) {}
+		// 清空 qqmusic 缓存并重新渲染
+		dataCache.qqmusic = null;
+		renderFromCache("qqmusic");
+	};
+
 	// ==================== Helpers ====================
 	function fmtNum(n) {
 		if (n == null) return "0"; n = parseInt(n);
@@ -883,6 +1099,19 @@
 	};
 	window.refreshCurrentView = function() {
 		fetchAllData().then(function() { renderFromCache(currentView); });
+	};
+	window.navigateToUser = function(platform, uid) {
+		if (!uid) return;
+		// 设置 UID 输入框
+		var input = document.getElementById(platform + "-uid");
+		if (input) { input.value = uid; }
+		targetUids[platform] = uid;
+		saveUidsToStorage();
+		// 清除缓存并刷新
+		dataCache[platform] = null;
+		fetchAllData().then(function() {
+			switchView(platform);
+		});
 	};
 
 	if (document.readyState === "loading") {

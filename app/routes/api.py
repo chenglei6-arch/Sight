@@ -465,12 +465,21 @@ def platform_all(platform):
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
-        # profile 完全为空且无快照兜底时返回错误
-        if result["profile"] is None and not result["playlists"] and not result["events"]:
+        # 检查是否有任何成功获取的数据
+        has_any_data = (
+            result["profile"] is not None
+            or result["playlists"]
+            or result["events"]
+            or result["follows"]
+            or result["followers"]
+        )
+        if not has_any_data:
             detail = "all_failed: " + "; ".join(errors)
             _log_fetch("GET /all", platform, uid, False, elapsed_ms, detail)
             return _error("所有数据模块均加载失败: " + "; ".join(errors))
 
+        # 部分数据成功：即使 profile/playlists/events 为空，
+        # 但只要 follows/followers 有数据就正常返回（如 QQ 音乐 SSR 降级场景）
         if errors:
             detail = "partial: " + "; ".join(errors)
             result["_errors"] = errors
@@ -483,6 +492,63 @@ def platform_all(platform):
         elapsed_ms = (time.perf_counter() - t0) * 1000
         _log_fetch("GET /all", platform, uid, False, elapsed_ms, str(e))
         return _error(str(e))
+
+
+# ==================== QQ音乐 QR 扫码登录 ====================
+
+@bp.route("/qqmusic/qr-login/start", methods=["POST"])
+def qr_login_start():
+    """启动 QQ 音乐 QR 扫码登录"""
+    from app.services.qqmusic_qr_login import get_session
+    body = request.get_json(force=True, silent=True) or {}
+    target_uid = body.get("uid", "oK6kowEAoK4z7Knioivl7evl7n**")
+    session = get_session()
+    result = session.start(target_uid)
+    return _result(result)
+
+
+@bp.route("/qqmusic/qr-login/status")
+def qr_login_status():
+    """轮询 QR 登录状态"""
+    from app.services.qqmusic_qr_login import get_session
+    session = get_session()
+    return _result(session.get_status_dict())
+
+
+@bp.route("/qqmusic/qr-login/follows")
+def qr_login_follows():
+    """获取关注列表（登录后使用）"""
+    uid = request.args.get("uid", "oK6kowEAoK4z7Knioivl7evl7n**")
+    from app.services.qqmusic_qr_login import get_session
+    session = get_session()
+    status_data = session.get_status_dict()
+
+    # 如果已经登录但还未抓取，返回当前状态
+    if status_data["status"] == "done" and status_data.get("follow_data"):
+        return _result(status_data["follow_data"])
+
+    # 如果还在进行中，告知状态
+    if status_data["status"] in ("logged_in", "fetching", "starting", "qr_ready"):
+        return _result({
+            "status": status_data["status"],
+            "message": "请等待登录完成后自动获取",
+        })
+
+    # 未开始或已停止：启动新流程
+    result = session.start(uid)
+    return _result({
+        "status": result["status"],
+        "message": "扫码登录流程已启动",
+    })
+
+
+@bp.route("/qqmusic/qr-login/stop", methods=["POST"])
+def qr_login_stop():
+    """停止 QR 登录会话"""
+    from app.services.qqmusic_qr_login import get_session
+    session = get_session()
+    session.stop()
+    return _result({"status": "stopped"})
 
 
 # ==================== 状态检查 ====================

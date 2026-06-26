@@ -8,19 +8,24 @@ API 说明:
   - 需要 Referer: https://y.qq.com 防盗链
   - 返回 JSONP 格式 (需提取 callback)
   - g_tk 参数用于鉴权 (未登录=5381)
-  - QQ 音乐没有公开的按昵称搜索用户的 API
 
 数据结构:
-  - 用户标识: uin (QQ 号)
+  - 用户标识: uin (QQ 号) 或 encrypt_uin (加密标识, 带 ** 后缀)
   - 歌单 (Playlist) 是 QQ 音乐的核心内容组织形式
   - 用户可创建和收藏歌单
+
+核心策略 (精简版):
+  搜索: musicu.fcg search_type=8 (唯一方式，需 Cookie)
+  资料: 手机版 SSR 页面 i.y.qq.com (唯一方式，支持 uin 和 encrypt_uin)
+  歌单: 手机版 SSR 页面 DissList 提取
 """
 import json
 import random
 import re
+import subprocess
 import time
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import quote
 
 import requests
 
@@ -60,6 +65,12 @@ class QQMusicAdapter(BasePlatformAdapter):
         self._session: requests.Session | None = None
         self._last_request_at = 0.0
         self._g_tk = 5381  # 未登录默认值
+        # 用户搜索缓存: encrypt_uin → {nickname, avatar_url, encrypt_uin}
+        # 用于搜索结果直接返回资料，避免二次请求
+        self._user_cache: dict[str, dict] = {}
+        # SSR 页面缓存: uid → (html, timestamp)
+        # 避免 profile、歌单、events 重复请求同一页面
+        self._ssr_page_cache: dict[str, tuple[str, float]] = {}
 
     @property
     def session(self) -> requests.Session:
@@ -239,8 +250,57 @@ class QQMusicAdapter(BasePlatformAdapter):
             except json.JSONDecodeError:
                 return {}
 
+    def _curl_get(self, url: str, timeout: int = 15) -> str:
+        """
+        使用 curl 发起 HTTP GET 请求（带当前会话 Cookie）。
+
+        Python requests 对某些 QQ 音乐域名 (i.y.qq.com, i2.y.qq.com)
+        存在 SSL 握手问题 (SSLEOFError)，curl 可正常访问。
+        """
+        try:
+            cmd = [
+                "curl", "-s", "--max-time", str(timeout),
+                "-L",  # 跟随重定向
+                "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                "-H", "Referer: https://y.qq.com/",
+                "-H", "Accept-Language: zh-CN,zh;q=0.9",
+            ]
+            # 传递当前会话的 Cookie
+            cookie_str = self._get_curl_cookie_str()
+            if cookie_str:
+                cmd.extend(["-H", f"Cookie: {cookie_str}"])
+            cmd.append(url)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout + 5,
+            )
+            if result.returncode == 0 and result.stdout:
+                return result.stdout
+            return ""
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            print(f"[QQ音乐] curl 请求异常: {e}")
+            return ""
+
+    def _get_curl_cookie_str(self) -> str:
+        """从当前会话提取 Cookie 字符串传给 curl"""
+        try:
+            parts = []
+            for c in self.session.cookies:
+                if c.value:
+                    parts.append(f"{c.name}={c.value}")
+            return "; ".join(parts)
+        except Exception:
+            return ""
+
     def _fetch_html(self, url: str) -> str:
-        """请求页面 HTML"""
+        """
+        请求页面 HTML。
+
+        优先使用 Python requests，SSL 失败时降级为 curl。
+        """
         for attempt in range(MAX_RETRIES):
             try:
                 self._rate_limit()
@@ -250,10 +310,37 @@ class QQMusicAdapter(BasePlatformAdapter):
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
             except requests.RequestException as e:
-                print(f"[QQ音乐] 页面请求异常: {e}")
+                err_str = str(e)
+                # SSL 错误降级到 curl
+                if "SSLError" in err_str or "EOF occurred" in err_str:
+                    print(f"[QQ音乐] SSL 错误，降级为 curl: {url[:60]}...")
+                    curl_result = self._curl_get(url, timeout=REQUEST_TIMEOUT)
+                    if curl_result:
+                        return curl_result
+                    print(f"[QQ音乐] curl 也失败")
+                else:
+                    print(f"[QQ音乐] 页面请求异常: {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
         return ""
+
+    def _fetch_ssr_page(self, uid: str) -> str:
+        """
+        获取并缓存 SSR 页面内容。
+
+        缓存 30 秒，避免 profile、歌单、events 多次请求同一页面。
+        """
+        now = time.time()
+        cached = self._ssr_page_cache.get(uid)
+        if cached and (now - cached[1]) < 30:
+            return cached[0]
+
+        html = self._fetch_html(
+            f"https://i.y.qq.com/n2/m/share/profile_v2/index.html?userid={quote(uid)}"
+        )
+        if html:
+            self._ssr_page_cache[uid] = (html, now)
+        return html
 
     # ==================== 状态检查 ====================
 
@@ -273,20 +360,12 @@ class QQMusicAdapter(BasePlatformAdapter):
     def get_login_user(self) -> Optional[dict]:
         """获取当前登录用户信息"""
         cookies = CredentialManager.load_cookies("qqmusic")
-        # 从 Cookie 获取 uin
         uin = ""
         for key in ("uin", "qqmusic_uin", "loginUin"):
             val = cookies.get(key, "")
             if val:
                 uin = val
                 break
-
-        if not uin:
-            # 尝试从首页推荐 API 获取
-            resp = self._api_get_json("/musichall/fcgi-bin/fcg_yqqhomepagerecommend.fcg")
-            if resp:
-                data = resp.get("data", {})
-                uin = str(data.get("loginUin", ""))
 
         if uin:
             return {"uid": uin, "nickname": "", "avatarUrl": ""}
@@ -298,10 +377,13 @@ class QQMusicAdapter(BasePlatformAdapter):
         """
         搜索用户
 
-        通过 QQ音乐通用 API 网关 (musicu.fcg) 的 search_type=8 搜索普通用户。
-        需要有效 Cookie 才能返回结果。
+        唯一方式: musicu.fcg search_type=8 (需 Cookie 登录态)
         """
-        # ---------- 策略1: musicu.fcg search_type=8 ----------
+        users = self._search_via_musicu_fcg(keyword, limit)
+        return users[:limit] if users else []
+
+    def _search_via_musicu_fcg(self, keyword: str, limit: int = 20) -> list[dict]:
+        """musicu.fcg 网关搜索 (需 Cookie 登录态)"""
         body = {
             "music.search.SearchCgiService": {
                 "module": "music.search.SearchCgiService",
@@ -319,68 +401,64 @@ class QQMusicAdapter(BasePlatformAdapter):
         try:
             raw = self._api_post_json("/cgi-bin/musicu.fcg", body)
         except Exception as e:
-            print(f"[QQ音乐] user search POST 失败: {e}")
-            raw = {}
+            print(f"[QQ音乐] musicu.fcg 搜索失败: {e}")
+            return []
 
-        if raw:
-            # 打印响应摘要便于调试
-            top_code = raw.get("code")
-            svc = raw.get("music.search.SearchCgiService", {})
-            svc_code = svc.get("code")
-            svc_data = svc.get("data", {})
-            svc_body = svc_data.get("body", {})
-            print(f"[QQ音乐] search resp: code={top_code} svc_code={svc_code} body_keys={list(svc_body.keys())}")
-            # 打印各分类的数量
-            for k in ("song", "singer", "album", "mv", "user", "zhida", "songlist"):
-                items = svc_body.get(k, {})
-                lst = items.get("list") if isinstance(items, dict) else (items if isinstance(items, list) else [])
-                print(f"  {k}: {len(lst)}")
+        if not raw:
+            return []
 
-            # 从所有可能的字段提取用户
-            users = []
-            seen = set()
-            for field in ("user", "zhida", "singer"):
-                raw_data = svc_body.get(field, {})
-                entries = raw_data.get("list", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    uid = str(entry.get("uin") or entry.get("id") or entry.get("uid", ""))
-                    if not uid or uid in seen:
-                        continue
-                    seen.add(uid)
-                    nick = entry.get("nick") or entry.get("name") or entry.get("title", "")
-                    avatar = entry.get("avatar") or entry.get("headurl") or entry.get("pic", "")
-                    sign = entry.get("sign") or entry.get("signature") or entry.get("desc", "")
-                    users.append({
-                        "uid": uid,
+        svc = raw.get("music.search.SearchCgiService", {})
+        svc_body = svc.get("data", {}).get("body", {})
+
+        users = []
+        seen = set()
+        for field in ("user", "zhida", "singer"):
+            raw_data = svc_body.get(field, {})
+            entries = raw_data.get("list", []) if isinstance(raw_data, dict) else (
+                raw_data if isinstance(raw_data, list) else []
+            )
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                raw_uin = str(entry.get("uin") or "")
+                encrypt_uin = str(entry.get("encrypt_uin", "") or "")
+                # 优先用真实 QQ 号，否则用 encrypt_uin
+                display_uid = raw_uin if raw_uin.isdigit() else (encrypt_uin if encrypt_uin else raw_uin)
+                if not display_uid or display_uid in seen:
+                    continue
+                seen.add(display_uid)
+                nick = entry.get("nick") or entry.get("name") or entry.get("title", "")
+                avatar = entry.get("avatar") or entry.get("headurl") or entry.get("pic", "")
+                sign = entry.get("sign") or entry.get("signature") or entry.get("desc", "")
+                users.append({
+                    "uid": display_uid,
+                    "nickname": nick,
+                    "avatarUrl": avatar,
+                    "signature": sign,
+                    "gender": entry.get("gender", 0),
+                    "type": field,
+                    "extra": {"uin": raw_uin, "encrypt_uin": encrypt_uin},
+                })
+                # 缓存用户信息，供 get_profile 和 get_follows/get_followers 查询
+                cache_key = encrypt_uin if encrypt_uin else raw_uin
+                if cache_key:
+                    self._user_cache[cache_key] = {
                         "nickname": nick,
-                        "avatarUrl": avatar,
+                        "avatar_url": avatar,
                         "signature": sign,
-                        "gender": entry.get("gender", 0),
-                        "extra": {"uin": uid},
-                    })
+                        "encrypt_uin": encrypt_uin,
+                        "uin": raw_uin,  # 保存原始 uin（可能是空字符串）
+                        "type": field,
+                    }
+                    # 也缓存不带 ** 的版本
+                    if encrypt_uin:
+                        clean = encrypt_uin.rstrip("*")
+                        if clean and clean != encrypt_uin:
+                            self._user_cache[clean] = self._user_cache[encrypt_uin]
 
-            if users:
-                print(f"[QQ音乐] user search → {len(users)} users")
-                return users[:limit]
-
-        # ---------- 策略2: 纯数字 → 直接查 ----------
-        if keyword.isdigit():
-            try:
-                profile = self.get_profile(keyword)
-                if profile:
-                    return [{
-                        "uid": profile.uid,
-                        "nickname": profile.nickname,
-                        "avatarUrl": profile.avatar_url,
-                        "signature": profile.signature,
-                        "gender": profile.gender,
-                    }]
-            except Exception as e:
-                print(f"[QQ音乐] 直接查资料失败: {e}")
-
-        return []
+        if users:
+            print(f"[QQ音乐] musicu.fcg 搜索 → {len(users)} 个用户")
+        return users
 
     # ==================== 用户资料 ====================
 
@@ -388,181 +466,267 @@ class QQMusicAdapter(BasePlatformAdapter):
         """
         获取用户资料
 
-        通过用户主页 API 获取歌单信息, 并从中提取用户信息。
+        唯一方式: 手机版 SSR 页面 (支持 uin 和 encrypt_uin)
+        优先返回搜索缓存结果。
         """
-        # 方式1: 尝试从 profile homepage API 获取用户信息
-        resp = self._api_get_json("/rsc/fcgi-bin/fcg_get_profile_homepage.fcg", {
-            "uin": uid,
-            "loginUin": uid,
-            "hostUin": uid,
-        })
+        uid = str(uid).strip()
+        if not uid:
+            return None
 
-        if resp and resp.get("code") == 0:
-            data = resp.get("data", {})
-            # 提取用户信息
-            creator = data.get("creator", {})
-            if creator:
-                return self._build_profile(creator, uid)
+        # 检查搜索缓存（如果搜索结果缓存了用户信息，直接返回）
+        cached = self._user_cache.get(uid) or self._user_cache.get(uid + "**")
+        if cached:
+            avatar = cached.get("avatar_url", "") or ""
+            return PlatformProfile(
+                platform="qqmusic",
+                uid=uid,
+                nickname=cached.get("nickname", uid),
+                avatar_url=avatar,
+                signature=cached.get("signature", ""),
+                gender=0,
+                extra={"uin": uid, "source": "user_cache", "encrypt_uin": cached.get("encrypt_uin", "")},
+            )
 
-        # 方式2: 通过用户创建的公开歌单获取信息
-        playlists = self._get_user_playlists_raw(uid)
-        if playlists:
-            # 从歌单数据中提取用户信息
-            disslist = playlists.get("mydiss", []) if isinstance(playlists, dict) else playlists
-            if disslist and isinstance(disslist, list) and len(disslist) > 0:
-                first = disslist[0]
-                creator_info = first.get("creator", {}) or {}
-                if creator_info:
-                    return self._build_profile(creator_info, uid)
+        # 手机版 SSR 页面
+        return self._get_profile_via_mobile_ssr(uid)
 
-            # 从歌单数据提取访问者信息
-            visitor = playlists.get("visitor", {}) if isinstance(playlists, dict) else {}
-            if visitor:
-                return self._build_profile(visitor, uid)
+    @staticmethod
+    def _extract_js_string(html: str, var_name: str) -> str:
+        """
+        从 HTML 中提取 JS 字符串变量的值（正确处理转义引号）。
 
-        # 方式3: 从网页端抓取用户信息
+        JS 中 var="value" 格式，正确处理 \\" 转义。
+        """
+        idx = html.find(f'{var_name}=')
+        if idx < 0:
+            return ""
+
+        rest = html[idx + len(var_name) + 1:]
+        if not rest or rest[0] != '"':
+            return ""
+
+        rest = rest[1:]
+        result = []
+        i = 0
+        while i < len(rest):
+            ch = rest[i]
+            if ch == '\\':
+                if i + 1 < len(rest):
+                    result.append(rest[i:i+2])
+                    i += 2
+                else:
+                    result.append(ch)
+                    i += 1
+            elif ch == '"':
+                return ''.join(result)
+            else:
+                result.append(ch)
+                i += 1
+        return ''.join(result)
+
+    def _get_profile_via_mobile_ssr(self, uid: str) -> Optional[PlatformProfile]:
+        """
+        通过 QQ 音乐手机版 SSR 页面获取用户资料。
+
+        使用 i.y.qq.com/n2/m/share/profile_v2/index.html?userid={uid}
+        的 SSR 内嵌数据，支持真实 QQ 号和 encrypt_uin 两种标识。
+
+        注: i.y.qq.com / i2.y.qq.com 有 SSL 问题，Python requests 无法连接，
+        内部自动降级为 curl 获取。
+        """
+        uid = str(uid).strip()
+        if not uid:
+            return None
+
         try:
-            html = self._fetch_html(f"{self.WEB_BASE}/n/ryqq/profile/{uid}")
-            if html:
-                # 提取用户信息
-                nickname = ""
-                match = re.search(r'"nickname"\s*:\s*"([^"]+)"', html)
-                if match:
-                    nickname = match.group(1)
-                if nickname:
-                    return PlatformProfile(
-                        platform="qqmusic",
-                        uid=uid,
-                        nickname=nickname,
-                        extra={"uin": uid},
-                    )
+            html = self._fetch_ssr_page(uid)
+            if not html:
+                return None
+
+            raw = self._extract_js_string(html, "__ssrFirstPageData__")
+            if not raw:
+                return None
+
+            # 解析双编码 JSON
+            try:
+                inner = json.loads('"' + raw + '"')
+                data = json.loads(inner)
+            except json.JSONDecodeError:
+                s = raw.replace('\\"', '"').replace('\\u002F', '/').replace('\\n', '')
+                try:
+                    data = json.loads(s)
+                except json.JSONDecodeError:
+                    return None
+
+            home_data = data.get("homeData", {})
+            page_data = home_data.get("data", {}) if isinstance(home_data, dict) else {}
+            info = page_data.get("Info", {})
+            base = info.get("BaseInfo", {}) if isinstance(info, dict) else {}
+
+            nickname = base.get("Name", "") or base.get("name", "")
+            encrypt_uin = base.get("EncryptedUin", "") or ""
+            avatar = base.get("Avatar", "") or ""
+            big_avatar = base.get("BigAvatar", "") or ""
+
+            if not nickname:
+                return None
+
+            # 性别
+            gender = 0
+            if isinstance(info, dict):
+                gender_info = info.get("Gender", {})
+                if isinstance(gender_info, dict):
+                    gs = gender_info.get("Gender", "")
+                    if gs == "男":
+                        gender = 1
+                    elif gs == "女":
+                        gender = 2
+
+            extra = {"uin": uid, "source": "mobile_ssr", "encrypt_uin": encrypt_uin}
+            # 访客/粉丝/关注/朋友数 (SSR 页面统计信息)
+            if isinstance(info, dict):
+                for k in ("VisitorNum", "FansNum", "FriendsNum", "FollowNum"):
+                    v = info.get(k, {})
+                    if isinstance(v, dict) and v.get("Num"):
+                        extra[f"m{k}"] = v.get("Num")
+
+            # 缓存
+            if encrypt_uin:
+                self._user_cache[encrypt_uin] = {
+                    "nickname": nickname, "avatar_url": avatar or big_avatar,
+                    "signature": "", "encrypt_uin": encrypt_uin, "type": "user",
+                }
+                clean = encrypt_uin.rstrip("*")
+                if clean and clean != encrypt_uin:
+                    self._user_cache[clean] = self._user_cache[encrypt_uin]
+
+            return PlatformProfile(
+                platform="qqmusic", uid=uid, nickname=nickname,
+                avatar_url=avatar or big_avatar,
+                signature=base.get("signature", "") or base.get("desc", "") or "",
+                gender=gender, extra=extra,
+            )
+
         except Exception as e:
-            print(f"[QQ音乐] 网页抓取失败: {e}")
+            print(f"[QQ音乐] 手机版 SSR 获取失败 ({uid}): {e}")
+            return None
 
-        return None
+    # ==================== 歌单 ====================
 
-    def _get_user_playlists_raw(self, uin: str) -> dict:
-        """获取用户的原始歌单数据"""
-        resp = self._api_get_json("/rsc/fcgi-bin/fcg_get_profile_homepage.fcg", {
-            "uin": uin,
-            "loginUin": uin,
-            "hostUin": uin,
-        })
-        if resp and resp.get("code") == 0:
-            return resp.get("data", {})
-        return {}
+    def _get_playlists_via_mobile_ssr(self, uid: str) -> list[ContentItem]:
+        """
+        通过手机版 SSR 页面提取用户的歌单列表。
 
-    def _build_profile(self, data: dict, uid: str) -> PlatformProfile:
-        """从 API 数据构建用户资料"""
-        nickname = data.get("nick") or data.get("nickname") or data.get("name", "")
-        avatar_url = data.get("avatar") or data.get("headpic", "")
+        手机版资料页面的 IntroductionTab DissList 包含公开歌单。
+        使用 _fetch_ssr_page 避免重复请求（与 profile 共享 SSR 缓存）。
+        """
+        uid = str(uid).strip()
+        if not uid:
+            return []
 
-        # 头像 URL 补全
-        if avatar_url and avatar_url.startswith("http://"):
-            avatar_url = avatar_url.replace("http://", "https://")
-        if avatar_url and not avatar_url.startswith("http"):
-            avatar_url = f"https://y.gtimg.cn/music/photo_new/T001R300x300M000{avatar_url}.jpg"
+        items = []
+        seen = set()
 
-        # QQ 音乐等级
-        _level = 0
-        if isinstance(data.get("level"), int):
-            _level = data["level"]
-        elif isinstance(data.get("lv"), int):
-            _level = data["lv"]
-        elif isinstance(data.get("score"), int):
-            _level = min(data["score"] // 100, 100)
+        try:
+            html = self._fetch_ssr_page(uid)
+            if not html:
+                return []
 
-        return PlatformProfile(
-            platform="qqmusic",
-            uid=str(data.get("uin", uid)),
-            nickname=nickname,
-            avatar_url=avatar_url,
-            signature=data.get("desc", ""),
-            gender=data.get("gender", 0),
-            is_vip=bool(data.get("vip") or data.get("is_vip")),
-            vip_label=data.get("vip_type", ""),
-            level=_level,
-            extra={
-                "uin": str(data.get("uin", uid)),
-                "create_time": data.get("create_time", ""),
-                "listen_num": data.get("listen_num", 0),
-            },
+            raw = self._extract_js_string(html, "__ssrFirstPageData__")
+            if not raw:
+                return []
+
+            try:
+                inner = json.loads('"' + raw + '"')
+                data = json.loads(inner)
+            except json.JSONDecodeError:
+                s = raw.replace('\\"', '"').replace('\\u002F', '/').replace('\\n', '')
+                try:
+                    data = json.loads(s)
+                except json.JSONDecodeError:
+                    return []
+
+            home_data = data.get("homeData", {})
+            page_data = home_data.get("data", {}) if isinstance(home_data, dict) else {}
+            tab_detail = page_data.get("TabDetail", {}) if isinstance(page_data, dict) else {}
+            intro_tab = tab_detail.get("IntroductionTab", {}) if isinstance(tab_detail, dict) else {}
+            intro_list = intro_tab.get("List", []) if isinstance(intro_tab, dict) else []
+
+            for section in intro_list:
+                if not isinstance(section, dict):
+                    continue
+                if section.get("ItemType") == 10:
+                    diss_data = section.get("DissList")
+                    if not diss_data:
+                        continue
+                    # DissList 可能是 [{"list": [...], "title": "..."}] 或 {"list": [...]}
+                    if isinstance(diss_data, list):
+                        for group in diss_data:
+                            if not isinstance(group, dict):
+                                continue
+                            diss_items = group.get("list", [])
+                            if not isinstance(diss_items, list):
+                                continue
+                            for diss in diss_items:
+                                item = self._diss_to_content_item(diss, seen)
+                                if item:
+                                    items.append(item)
+                    elif isinstance(diss_data, dict):
+                        diss_items = diss_data.get("list", [])
+                        if isinstance(diss_items, list):
+                            for diss in diss_items:
+                                item = self._diss_to_content_item(diss, seen)
+                                if item:
+                                    items.append(item)
+
+            if items:
+                print(f"[QQ音乐] 手机版 SSR 获取到 {len(items)} 个歌单")
+            return items
+
+        except Exception as e:
+            print(f"[QQ音乐] 手机版 SSR 歌单提取失败: {e}")
+            return []
+
+    def _diss_to_content_item(self, diss: dict, seen: set) -> Optional[ContentItem]:
+        """从 DissList 中的单个歌单条目构建 ContentItem"""
+        if not isinstance(diss, dict):
+            return None
+        did = str(diss.get("dissid", "") or "")
+        if not did or did in seen:
+            return None
+        seen.add(did)
+        title = diss.get("title", "") or "未命名歌单"
+        pic = diss.get("picurl", "") or diss.get("pic", "") or ""
+        subtitle = diss.get("subtitle", "") or ""
+        song_count = 0
+        play_count = 0
+        sc = re.search(r'(\d+)首', subtitle)
+        if sc:
+            song_count = int(sc.group(1))
+        pc = re.search(r'(\d+)次播放', subtitle)
+        if pc:
+            play_count = int(pc.group(1))
+        return ContentItem(
+            item_id=did, title=title[:200], cover_url=pic,
+            count=song_count, view_count=play_count,
+            description="", is_owner=True,
+            extra={"type": "create", "source": "mobile_ssr"},
         )
-
-    # ==================== 歌单列表 ====================
 
     def get_content_lists(self, uid: str) -> list[ContentItem]:
         """
-        获取用户的歌单列表 (创建 + 收藏)
+        获取用户的歌单列表
 
-        返回用户创建的歌单 (mydiss) 和收藏的歌单 (otherdiss)。
-        对歌手 ID 兜底返回 "热门歌曲" 列表。
+        唯一方式: 手机版 SSR 页面提取 DissList
         """
-        items = []
-        seen_ids = set()
-
-        data = self._get_user_playlists_raw(uid)
-        if data:
-            # 用户创建的歌单
-            mydiss = data.get("mydiss", []) if isinstance(data, dict) else data
-            if isinstance(mydiss, list):
-                for diss in mydiss:
-                    item = self._build_content_item(diss, is_owner=True)
-                    if item and item.item_id not in seen_ids:
-                        seen_ids.add(item.item_id)
-                        items.append(item)
-
-            # 用户收藏的歌单
-            otherdiss = data.get("otherdiss", []) if isinstance(data, dict) else []
-            if isinstance(otherdiss, list):
-                for diss in otherdiss:
-                    item = self._build_content_item(diss, is_owner=False)
-                    if item and item.item_id not in seen_ids:
-                        seen_ids.add(item.item_id)
-                        items.append(item)
-
+        try:
+            items = self._get_playlists_via_mobile_ssr(uid)
             if items:
                 return items
+        except Exception as e:
+            print(f"[QQ音乐] 手机版 SSR 歌单获取失败: {e}")
 
-        return items
-
-    @staticmethod
-    def _build_content_item(diss: dict, is_owner: bool = True) -> Optional[ContentItem]:
-        """从歌单数据构建统一内容项"""
-        diss_id = str(diss.get("dissid", "") or diss.get("id", ""))
-        if not diss_id or diss_id == "0":
-            return None
-
-        # 封面处理
-        cover_url = ""
-        for key in ("cover_url", "cover", "pic", "picurl", "logo", "headurl"):
-            val = diss.get(key, "")
-            if val:
-                cover_url = val
-                break
-
-        # 数量 (歌曲数)
-        count = diss.get("song_count", 0) or diss.get("cnt", 0) or diss.get("total_song_num", 0)
-
-        # 播放量
-        listen_count = diss.get("listen_count", 0) or diss.get("access_num", 0)
-
-        return ContentItem(
-            item_id=diss_id,
-            title=diss.get("diss_name", diss.get("title", diss.get("name", "未命名歌单")))[:200],
-            cover_url=cover_url,
-            count=int(count),
-            view_count=int(listen_count),
-            creator=diss.get("nickname", diss.get("creator", {}).get("nick", "")) if not is_owner else "",
-            description=diss.get("desc", "")[:200],
-            is_owner=is_owner,
-            create_time=str(diss.get("create_time", "")),
-            extra={
-                "type": "create" if is_owner else "collect",
-                "song_ids": diss.get("song_ids", []),
-                "tag": diss.get("tag", ""),
-            },
-        )
+        return []
 
     def get_content_detail(self, item_id: str) -> Optional[dict]:
         """
@@ -574,7 +738,6 @@ class QQMusicAdapter(BasePlatformAdapter):
         Returns:
             包含信息和歌曲列表的字典
         """
-        # 普通歌单
         resp = self._api_get_json("/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg", {
             "type": 1,
             "disstid": item_id,
@@ -632,33 +795,9 @@ class QQMusicAdapter(BasePlatformAdapter):
         """
         获取用户的听歌排行
 
-        注意: 仅登录用户可查看自己的排行。
-        period: "all" = 总排行, "week" = 周排行
-
-        实现: 通过 QQ 音乐用户主页信息获取听歌数据。
+        QQ 音乐无公开的听歌排行 API，返回空。
         """
-        # 获取用户主页数据中的听歌信息
-        data = self._get_user_playlists_raw(uid)
-        if not data:
-            return []
-
-        entries = []
-
-        # 听歌总量
-        listen_num = data.get("listen_num", 0)
-        if listen_num:
-            entries.append(MediaEntry(
-                entry_id=f"listen_total_{uid}",
-                title=f"累计听歌 {listen_num} 首",
-                artist_or_uploader="",
-                play_count=int(listen_num),
-            ))
-
-        # 如果有详细听歌排行数据 (需要进一步 API)
-        # QQ 音乐的听歌排行可能需要额外的 API 调用
-        # 这里作为扩展点
-
-        return entries
+        return []
 
     # ==================== 动态 ====================
 
@@ -690,20 +829,314 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         return events
 
-    # ==================== 社交 ====================
+    # ==================== 社交 (关注/粉丝) ====================
+
+    # 关注/粉丝列表 API 路径
+    FOLLOW_API_PATH = "/splcloud/fcgi-bin/friend_follow_or_listen_list.fcg"
+
+    @staticmethod
+    def _parse_jsonp_loose(text: str) -> dict:
+        """
+        解析 QQ 音乐的松散 JSONP 响应。
+
+        格式: JSONCallBack({"code":0, retcode:0, total:2, list:[{uin:123, nick_name:"xx"}]})
+        特点: JSONP 包裹 + 属性名可能未加引号
+        """
+        if not text:
+            return {}
+
+        # 去掉 JSONP 包裹
+        m = re.search(r'^\w+\((.+)\);?\s*$', text.strip(), re.DOTALL)
+        if m:
+            inner = m.group(1)
+        else:
+            inner = text.strip()
+
+        # 尝试标准 JSON 解析
+        try:
+            return json.loads(inner)
+        except json.JSONDecodeError:
+            pass
+
+        # 松散解析: 给未引号的属性名加上引号
+        # 匹配 {key: 或 ,key: 模式 (key 为字母/数字/下划线)
+        fixed = re.sub(
+            r'([{,]\s*)([a-zA-Z_]\w*)(\s*:)',
+            r'\1"\2"\3',
+            inner
+        )
+        # 单引号转双引号
+        fixed = fixed.replace("'", '"')
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            return {}
+
+    def _fetch_follow_list(self, uin: str, start: int, num: int, is_listen: int = 0) -> Optional[dict]:
+        """
+        获取关注/粉丝列表单页数据。
+
+        Args:
+            uin: QQ 号
+            start: 起始位置
+            num: 每页数量
+            is_listen: 0=关注列表, 1=粉丝列表
+
+        Returns:
+            解析后的响应 dict, 包含 total, list 等字段
+        """
+        # 粉丝 API (is_listen=1) 在大 V 账号上经常超时，减少重试次数
+        max_attempts = 1 if is_listen else MAX_RETRIES
+        for attempt in range(max_attempts):
+            try:
+                self._rate_limit()
+                params = {
+                    "utf8": 1,
+                    "start": start,
+                    "num": num,
+                    "uin": uin,
+                    "format": "json",
+                    "g_tk": self._g_tk,  # 使用 session 的真实 g_tk
+                }
+                if is_listen:
+                    params["is_listen"] = 1
+
+                # 粉丝列表可能很慢（大 V 用户），使用更长 timeout
+                # 但只等一次，超时就放弃
+                follow_timeout = 30 if is_listen else REQUEST_TIMEOUT
+
+                resp = self.session.get(
+                    f"{self.API_BASE}{self.FOLLOW_API_PATH}",
+                    params=params,
+                    timeout=follow_timeout,
+                )
+                if resp.status_code == 200:
+                    data = self._parse_jsonp_loose(resp.text)
+                    if data and data.get("code") == 0:
+                        return data
+                    if data and data.get("code") == 1101:
+                        # 参数错误（可能是 encrypt_uin 无法查询）
+                        return None
+                elif resp.status_code == 500 and is_listen:
+                    # 粉丝 API 服务端错误，无需重试
+                    return None
+                if attempt < max_attempts - 1:
+                    time.sleep(1)
+            except requests.RequestException as e:
+                print(f"[QQ音乐] 关注/粉丝请求异常: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(1)
+        return None
+
+    def _resolve_real_uin(self, uid: str) -> Optional[str]:
+        """
+        尝试将 uid (可能是 encrypt_uin) 转为真实 QQ 号。
+
+        从缓存中查找搜索时保存的真实 uin。
+        """
+        # 如果已经是纯数字，直接返回
+        if uid.isdigit():
+            return uid
+
+        # 检查缓存: 搜索时保存的真实 uin
+        for key in (uid, uid.rstrip("*"), uid + "**"):
+            cached = self._user_cache.get(key)
+            if cached:
+                cached_uin = cached.get("uin", "")
+                if cached_uin.isdigit():
+                    return cached_uin
+                # 有加密 uin 但没有真实 uin
+                return None
+
+        return None
+
+    def _parse_follow_item(self, item: dict) -> dict:
+        """解析关注/粉丝条目为标准格式，并缓存发现的真实 QQ 号"""
+        nick = item.get("nick_name", "") or item.get("nick", "") or item.get("name", "")
+        logo = item.get("logo", "") or item.get("headurl", "") or item.get("avatar", "")
+        uin = str(item.get("uin", ""))
+        encrypt_uin = str(item.get("encrypt_uin", "") or "")
+        uid = encrypt_uin if encrypt_uin else uin
+
+        # 缓存发现的真实 QQ 号，供后续查询
+        if uin.isdigit() and encrypt_uin:
+            self._user_cache[encrypt_uin] = {
+                "nickname": nick,
+                "avatar_url": logo,
+                "signature": item.get("desc", "")[:200] if item.get("desc") else "",
+                "encrypt_uin": encrypt_uin,
+                "uin": uin,
+                "type": "user",
+            }
+            clean = encrypt_uin.rstrip("*")
+            if clean and clean != encrypt_uin:
+                self._user_cache[clean] = self._user_cache[encrypt_uin]
+
+        return {
+            "uid": uid,
+            "uin": uin,
+            "encrypt_uin": encrypt_uin,
+            "nickname": nick,
+            "avatarUrl": logo if logo.startswith("http") else "",
+            "avatar": logo,
+            "signature": item.get("desc", "")[:200] if item.get("desc") else "",
+            "is_follow": item.get("is_follow", 0),
+            "follow_time": item.get("follow_time", 0),
+            "listen_num": item.get("listen_num", 0),
+            "songlist_num": item.get("songlist_num", 0),
+            "follow_num": item.get("follow_num", 0),
+        }
+
+    def _try_get_ssr_count(self, uid: str, field: str) -> Optional[int]:
+        """
+        尝试从 SSR 缓存中获取关注/粉丝等统计数字。
+
+        Args:
+            uid: 用户 ID
+            field: Info 中的字段名 (FollowNum/FansNum)
+
+        Returns:
+            数字或 None
+        """
+        try:
+            html = self._fetch_ssr_page(uid)
+            if not html:
+                return None
+            raw = self._extract_js_string(html, "__ssrFirstPageData__")
+            if not raw:
+                return None
+            inner = json.loads('"' + raw + '"')
+            data = json.loads(inner)
+            home_data = data.get("homeData", {})
+            page_data = home_data.get("data", {}) if isinstance(home_data, dict) else {}
+            info = page_data.get("Info", {}) if isinstance(page_data, dict) else {}
+            v = info.get(field, {})
+            if isinstance(v, dict):
+                return v.get("Num")
+        except Exception:
+            pass
+        return None
 
     def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
         """
-        获取关注列表
+        获取用户的关注列表 (他关注了谁)。
 
-        QQ 音乐无公开的关注列表 API，返回空。
+        支持分页查询。
+        对于 encrypt_uin 用户，API 无法返回关注列表（需要真实 QQ 号），
+        但 SSR 页面有 FollowNum（关注总数），会以特殊标记返回。
         """
-        return []
+        uid = str(uid).strip()
+        if not uid:
+            return []
+
+        # 解析真实 QQ 号
+        real_uin = self._resolve_real_uin(uid)
+        if not real_uin:
+            if uid.isdigit():
+                real_uin = uid
+            else:
+                print(f"[QQ音乐] 关注列表: {uid} 是加密用户，尝试从 SSR 获取关注数")
+                # SSR 页面的 FollowNum
+                ssr_count = self._try_get_ssr_count(uid, "FollowNum")
+                if ssr_count is not None:
+                    print(f"[QQ音乐] SSR 关注数: {ssr_count}")
+                    return [{
+                        "_count_only": True,
+                        "count": ssr_count,
+                        "uid": uid,
+                        "nickname": f"关注了 {ssr_count} 人",
+                        "avatarUrl": "",
+                        "note": "QQ音乐隐藏了此用户的QQ号，无法获取详细关注列表",
+                    }]
+                return []
+
+        # 分页获取所有关注
+        all_items = []
+        page_size = min(limit, 40)
+        start = 0
+
+        while len(all_items) < limit:
+            data = self._fetch_follow_list(real_uin, start, page_size, is_listen=0)
+            if not data:
+                break
+
+            total = data.get("total", 0)
+            items = data.get("list", [])
+            if not items:
+                break
+
+            for item in items:
+                if len(all_items) >= limit:
+                    break
+                all_items.append(self._parse_follow_item(item))
+
+            start += page_size
+            if start >= total or len(items) < page_size:
+                break
+
+        if all_items:
+            print(f"[QQ音乐] 关注列表: {len(all_items)} 人")
+        return all_items
 
     def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
         """
-        获取粉丝列表
+        获取用户的粉丝列表 (谁关注了他)。
 
-        QQ 音乐无公开的粉丝列表 API，返回空。
+        支持分页查询。
+        对于 encrypt_uin 用户，API 无法返回粉丝列表（需要真实 QQ 号），
+        但 SSR 页面有 FansNum（粉丝总数），会以特殊标记返回。
+
+        注意: QQ 音乐的粉丝 API (is_listen=1) 服务端不稳定，大 V 用户会超时，
+        此时返回空列表，但粉丝数可从 SSR 页面获取。
         """
-        return []
+        uid = str(uid).strip()
+        if not uid:
+            return []
+
+        # 解析真实 QQ 号
+        real_uin = self._resolve_real_uin(uid)
+        if not real_uin:
+            if uid.isdigit():
+                real_uin = uid
+            else:
+                print(f"[QQ音乐] 粉丝列表: {uid} 是加密用户，尝试从 SSR 获取粉丝数")
+                ssr_count = self._try_get_ssr_count(uid, "FansNum")
+                if ssr_count is not None:
+                    print(f"[QQ音乐] SSR 粉丝数: {ssr_count}")
+                    return [{
+                        "_count_only": True,
+                        "count": ssr_count,
+                        "uid": uid,
+                        "nickname": f"{ssr_count} 位粉丝",
+                        "avatarUrl": "",
+                        "note": "QQ音乐隐藏了此用户的QQ号，无法获取详细粉丝列表",
+                    }]
+                return []
+
+        # 分页获取所有粉丝
+        all_items = []
+        page_size = min(limit, 40)
+        start = 0
+
+        while len(all_items) < limit:
+            data = self._fetch_follow_list(real_uin, start, page_size, is_listen=1)
+            if not data:
+                break
+
+            total = data.get("total", 0)
+            items = data.get("list", [])
+            if not items:
+                break
+
+            for item in items:
+                if len(all_items) >= limit:
+                    break
+                all_items.append(self._parse_follow_item(item))
+
+            start += page_size
+            if start >= total or len(items) < page_size:
+                break
+
+        if all_items:
+            print(f"[QQ音乐] 粉丝列表: {len(all_items)} 人")
+        return all_items

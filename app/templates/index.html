@@ -92,6 +92,9 @@
         </div>
         <div class="pc-search-results" id="qqmusic-results"></div>
         <div class="pc-profile-mini" id="qqmusic-mini"></div>
+        <div style="margin-top:6px;display:flex;gap:4px;">
+          <button class="btn" onclick="startQrLogin()" style="flex:1;font-size:10px;padding:4px 6px;">📱 扫码查关注</button>
+        </div>
       </div>
     </div>
 
@@ -133,6 +136,6 @@
 <!-- Modal -->
 <div class="modal-overlay" id="modal-overlay"><div class="modal" id="modal-content"></div></div>
 
-<script src="{{ url_for('static', filename='js/app.js') }}?v=24"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v=26"></script>
 </body>
 </html>

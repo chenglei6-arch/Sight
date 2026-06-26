@@ -119,19 +119,48 @@ QQ 音乐的 API 主要集中在 `c.y.qq.com` 域名下：
 
 | API 端点 | 功能 | 是否需要登录 |
 |----------|------|-------------|
-| `u.y.qq.com/cgi-bin/musicu.fcg` | **用户搜索** (search_type=8) | 否 |
+| `u.y.qq.com/cgi-bin/musicu.fcg` | 通用搜索网关 (search_type=8) | 需 Cookie |
+| `splcloud/fcgi-bin/smartbox_new.fcg` | **智能搜索/自动补全 (获取歌手)** | **否** |
+| `soso/fcgi-bin/client_search_cp` | 客户端搜索 (歌曲/歌手) | 否 |
 | `rsc/fcgi-bin/fcg_get_profile_homepage.fcg` | 用户主页/歌单 | 否(基础) |
 | `qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg` | 歌单详情(含歌曲) | 否 |
-| `soso/fcgi-bin/client_search_cp` | 歌曲/歌手搜索 | 否 |
 | `musichall/fcgi-bin/fcg_yqqhomepagerecommend.fcg` | 首页推荐 | 否 |
+| `splcloud/fcgi-bin/friend_follow_or_listen_list.fcg` | 关注/粉丝列表 | 否(关注) / 需 Cookie(粉丝) |
+| `i.y.qq.com/n2/m/share/profile_v2/index.html` | 用户资料 SSR 页面 | 否(需 curl 降级) |
 
 ### 关键机制
 
 1. **g_tk 鉴权**: 从 Cookie 的 `skey` / `p_skey` 计算，新版本使用 `qqmusic_key` / `qm_keyst` 代替，未登录默认 `5381`
 2. **防盗链**: 需要 `Referer: https://y.qq.com` 请求头
 3. **JSONP 处理**: 自动检测并解析 JSONP 格式响应
-4. **用户标识**: 使用 QQ 号 (`uin`) 作为用户 ID
+4. **用户标识**: 使用 QQ 号 (`uin`) 作为用户 ID，或使用 `singer_mid` 标识歌手
 5. **通用网关**: `u.y.qq.com/cgi-bin/musicu.fcg` 统一 POST 网关，`comm` 块自动注入 `g_tk`、`uin`、`format` 等公共参数
+6. **web scraping**: 新版页面使用 SSR，数据通过 `window.__INITIAL_DATA__` 注入 HTML
+
+### 搜索策略 (多策略瀑布式)
+
+```
+search_user(keyword) 执行以下策略，命中即返回:
+  策略1: musicu.fcg search_type=8 搜索普通用户 (需 Cookie 登录态)
+  策略2: smartbox_new.fcg 智能搜索 (无需登录，返回歌手及 singer_mid)
+  策略3: client_search_cp search_type=9 歌手搜索 (无需登录)
+  策略4: 纯数字 UIN → 直接查资料 (get_profile)
+  策略5: 网页端 HTML 解析 (兜底)
+```
+
+### 用户资料查询 (多策略)
+
+```
+get_profile(uid) 执行以下策略:
+  方式1: profile homepage API (fcg_get_profile_homepage)
+         - 适用于普通用户 (uin)
+         - 检测占位昵称并跳过
+  方式2: 从公开歌单数据提取用户信息
+  方式3: 歌手网页抓取 (y.qq.com/n/ryqq/singer/{singer_mid})
+         - 解析 window.__INITIAL_DATA__ 中的 singerDetail.basic_info
+         - 通过 _singer_cache 将搜索到的数字歌手 ID 映射为 singer_mid
+  方式4: 普通用户网页抓取兜底 (y.qq.com/n/ryqq/profile/{uin})
+```
 
 ### 主要方法
 
@@ -139,12 +168,14 @@ QQ 音乐的 API 主要集中在 `c.y.qq.com` 域名下：
 |------|------|------|
 | `check_alive()` | 检查 Cookie 有效性 | 检测 cookie 字段 (qqmusic_key + uin) |
 | `get_login_user()` | 获取登录用户 | 从 Cookie 读取 uin |
-| `get_profile(uid)` | 获取用户资料 | 多策略: API → 歌单 → 页面 |
-| `search_user(keyword)` | 搜索用户 | 通用网关 user search (search_type=8, 需 Cookie 登录态) + UIN 兜底 |
+| `get_profile(uid)` | 获取用户资料 | 手机版 SSR 页面（curl 降级） |
+| `search_user(keyword)` | 搜索用户 | 5种策略瀑布式搜索（见上方说明） |
 | `get_content_lists(uid)` | 获取歌单列表 | 创建 + 收藏 |
 | `get_content_detail(item_id)` | 获取歌单详情 | 含完整歌曲列表 |
 | `get_history(uid)` | 听歌排行 | 累计统计 |
 | `get_events(uid)` | 用户动态 | 基于歌单创建/收藏 |
+| `get_follows(uid, limit)` | 获取关注列表 | 支持分页，需真实 QQ 号 |
+| `get_followers(uid, limit)` | 获取粉丝列表 | 支持分页，粉丝数可从 profile 获取 |
 
 ### 使用示例
 
@@ -153,18 +184,33 @@ from app.platforms.qqmusic.adapter import QQMusicAdapter
 
 adapter = QQMusicAdapter()
 playlists = adapter.get_content_lists("123456789")  # QQ 号 (uin)
+
+# 搜索歌手
+results = adapter.search_user("周杰伦")
+for r in results:
+    print(f"歌手: {r['nickname']} (ID: {r['uid']})")
+    # 无需额外登录即可获取歌手资料
+    profile = adapter.get_profile(r['uid'])
+    print(f"  头像: {profile.avatar_url}")
 for pl in playlists:
     print(f"歌单: {pl.title} ({pl.count} 首)")
 ```
 
 ### 已知限制
 
-1. **社交功能**: 关注/粉丝列表无公开 API
+1. **社交功能（关注/粉丝）**:
+   - **真实 QQ 号用户**: 通过 `friend_follow_or_listen_list.fcg` API 获取，支持分页
+   - **encrypt_uin 用户（隐藏QQ号）**: QQ 音乐不公开其真实 QQ 号，关注列表 API 无法返回详情，仅能从 SSR 页面获取**关注/粉丝总数**。适配器已自动降级为 SSR 统计数模式（`_count_only` 标记）
+   - **粉丝列表不稳定**: QQ 音乐的粉丝 API (`is_listen=1`) 服务端在大 V 账号上可能返回 HTTP 500/超时
+2. **粉丝数后备**: 即使详细列表不可用，粉丝数和关注数仍可从 SSR 页面获取（`profile.extra.mFansNum` / `mFollowNum`）
+3. **SSL 兼容性**: Python requests 对 `i.y.qq.com` / `i2.y.qq.com` 存在 SSL 握手问题，已自动降级为 curl 获取 SSR 页面
 2. **Cookie 依赖**: 获取私人歌单/听歌排行需要登录 Cookie
-3. **用户搜索需要登录态**: `musicu.fcg` 网关搜索用户 (`search_type=8`) 需要有效 Cookie + 正确的 `g_tk`，匿名请求返回空
+3. ~~**用户搜索需要登录态**: `musicu.fcg` 网关搜索用户 (`search_type=8`) 需要有效 Cookie + 正确的 `g_tk`，匿名请求返回空~~
+   - ✅ 已解决: 增加无需登录的 smartbox 搜索和歌手 web scraping 兜底
 4. **g_tk 计算**: Cookie 中 `qqmusic_key` / `qm_keyst` 是新版鉴权字段（替代 `skey`），适配器已支持自动检测
 5. **check_alive**: 使用 cookie 字段检测代替已废弃的首页推荐接口（原接口返回 HTTP 500）
 6. **接口变动**: QQ 音乐可能更新 API 参数，需持续适配
+7. **旧版 API 已废弃**: `splcloud` 域名下的旧版歌手详情 API (`fcg_get_singer_detail.fcg` 等) 返回 HTTP 404，已改为 web scraping 方式
 
 ---
 
