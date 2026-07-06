@@ -51,6 +51,18 @@ def get_adapter(platform_id: str) -> Optional["BasePlatformAdapter"]:
         _registry[platform_id] = adapter
         return adapter
 
+    if platform_id == "weibo":
+        from app.platforms.weibo.adapter import WeiboAdapter
+        adapter = WeiboAdapter()
+        _registry[platform_id] = adapter
+        return adapter
+
+    if platform_id == "genshin":
+        from app.platforms.genshin.adapter import GenshinAdapter
+        adapter = GenshinAdapter()
+        _registry[platform_id] = adapter
+        return adapter
+
     return None
 
 

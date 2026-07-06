@@ -49,3 +49,5 @@ node_modules/
 # 参考源码 / 外部项目
 reference/
 
+# 临时文件
+tmp/

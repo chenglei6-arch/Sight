@@ -20,8 +20,8 @@ class CredentialManager:
         "bilibili": "bilibili_cookie.txt",
         "douyin": "douyin_cookie.txt",
         "qqmusic": "qqmusic_cookie.txt",
-        # 未来扩展:
-        # "weibo": "weibo_cookie.txt",
+        "weibo": "weibo_cookie.txt",
+        "genshin": "genshin_cookie.txt",
     }
 
     # 文件名别名（兼容不同拼写）
@@ -112,6 +112,7 @@ class CredentialManager:
             "douyin": "抖音",
             "qqmusic": "QQ音乐",
             "weibo": "微博",
+            "genshin": "原神",
         }
         return names.get(platform, platform)
 

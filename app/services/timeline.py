@@ -111,6 +111,9 @@ class TimelineBuilder:
         "netease": "网易云音乐",
         "bilibili": "哔哩哔哩",
         "douyin": "抖音",
+        "qqmusic": "QQ音乐",
+        "weibo": "微博",
+        "genshin": "原神",
     }
 
     # 各平台内容类型标签
@@ -118,6 +121,9 @@ class TimelineBuilder:
         "netease": "歌单",
         "bilibili": "视频",
         "douyin": "作品",
+        "qqmusic": "歌单",
+        "weibo": "微博",
+        "genshin": "角色",
     }
 
     @staticmethod
@@ -804,7 +810,7 @@ class TimelineBuilder:
         now = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
         lines = ["# 📊 多平台活动时间线", "", f"生成时间: {now}", ""]
         for entry in entries:
-            icon = {"netease": "🎵", "bilibili": "📺", "douyin": "🎶"}.get(entry.platform, "📌")
+            icon = {"netease": "🎵", "bilibili": "📺", "douyin": "🎶", "qqmusic": "🎵", "weibo": "💬", "genshin": "⚔️"}.get(entry.platform, "📌")
             if entry.time_str:
                 time_part = f"**{entry.time_str}**"
             elif entry.time_suffix and entry.time_suffix.startswith("⏳"):

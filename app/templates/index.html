@@ -98,6 +98,44 @@
       </div>
     </div>
 
+    <!-- 微博 -->
+    <div class="nav-card" id="nav-weibo" data-view="weibo">
+      <div class="nav-card-header" onclick="switchView('weibo')">
+        <span class="pc-icon">💬</span>
+        <span>微博</span>
+        <span class="pc-status" id="weibo-status">●</span>
+      </div>
+      <div class="nav-card-body">
+        <div class="pc-input-row">
+          <input type="text" id="weibo-uid" placeholder="输入 UID 或昵称..." value=""
+                 onchange="onUidChange('weibo')"
+                 onkeydown="if(event.key==='Enter') searchAndSet('weibo')">
+          <button onclick="searchAndSet('weibo')">🔍</button>
+        </div>
+        <div class="pc-search-results" id="weibo-results"></div>
+        <div class="pc-profile-mini" id="weibo-mini"></div>
+      </div>
+    </div>
+
+    <!-- 原神 -->
+    <div class="nav-card" id="nav-genshin" data-view="genshin">
+      <div class="nav-card-header" onclick="switchView('genshin')">
+        <span class="pc-icon">⚔️</span>
+        <span>原神</span>
+        <span class="pc-status" id="genshin-status">●</span>
+      </div>
+      <div class="nav-card-body">
+        <div class="pc-input-row">
+          <input type="text" id="genshin-uid" placeholder="输入游戏 UID..." value=""
+                 onchange="onUidChange('genshin')"
+                 onkeydown="if(event.key==='Enter') searchAndSet('genshin')">
+          <button onclick="searchAndSet('genshin')">🔍</button>
+        </div>
+        <div class="pc-search-results" id="genshin-results"></div>
+        <div class="pc-profile-mini" id="genshin-mini"></div>
+      </div>
+    </div>
+
     <!-- 时间线 -->
     <div class="nav-card" id="nav-timeline" data-view="timeline">
       <div class="nav-card-header" onclick="switchView('timeline')">

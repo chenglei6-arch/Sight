@@ -772,7 +772,7 @@ def unified_timeline():
                 now = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
                 lines = ["# 📊 多平台活动时间线（历史）", "", f"生成时间: {now}", ""]
                 for r in all_rows:
-                    icon = {"netease": "🎵", "bilibili": "📺"}.get(r.get("platform", ""), "📌")
+                    icon = {"netease": "🎵", "bilibili": "📺", "weibo": "💬", "genshin": "⚔️"}.get(r.get("platform", ""), "📌")
                     time_part = r.get("time_str", "") or r.get("time_suffix", "") or "时间未知"
                     line = f"- **{time_part}** {icon} {r.get('summary', '')}"
                     if r.get("detail"):

@@ -1,25 +1,29 @@
 """
 QQ音乐平台适配器
 
-基于 y.qq.com / c.y.qq.com 公开 API 的数据采集实现。
+基于 y.qq.com / c.y.qq.com / c6.y.qq.com 公开 API 的数据采集实现。
 
 API 说明:
-  - 大部分接口位于 c.y.qq.com 域名下
+  - c.y.qq.com / c6.y.qq.com: 主要API域名
+  - u.y.qq.com: 统一网关 (musicu.fcg)
+  - i.y.qq.com: SSR 页面 (需代理绕过SSL问题)
   - 需要 Referer: https://y.qq.com 防盗链
   - 返回 JSONP 格式 (需提取 callback)
   - g_tk 参数用于鉴权 (未登录=5381)
 
 数据结构:
   - 用户标识: uin (QQ 号) 或 encrypt_uin (加密标识, 带 ** 后缀)
-  - 歌单 (Playlist) 是 QQ 音乐的核心内容组织形式
-  - 用户可创建和收藏歌单
+  - QQ 音乐隐藏了大多数用户的真实 QQ 号，显示为 encrypt_uin
+  - 关注/粉丝列表 API 需要真实 QQ 号，encrypt_uin 无法使用
 
-核心策略 (精简版):
-  搜索: musicu.fcg search_type=8 (唯一方式，需 Cookie)
-  资料: 手机版 SSR 页面 i.y.qq.com (唯一方式，支持 uin 和 encrypt_uin)
-  歌单: 手机版 SSR 页面 DissList 提取
+已知限制:
+  - friend_follow_or_listen_list.fcg 需要真实 QQ 号 (uin)
+  - encrypt_uin 无法解密（QQ音乐服务端加密）
+  - fcg_get_profile_homepage.fcg 可查 encrypt_uin 用户的资料和关注数
 """
+import base64
 import json
+import os
 import random
 import re
 import subprocess
@@ -48,7 +52,11 @@ class QQMusicAdapter(BasePlatformAdapter):
 
     # API 基础域名
     API_BASE = "https://c.y.qq.com"
+    API_BASE_C6 = "https://c6.y.qq.com"
     WEB_BASE = "https://y.qq.com"
+
+    # 代理配置（i.y.qq.com 存在 SSL 问题，需代理访问）
+    PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or ""
 
     # 公共请求参数
     COMMON_PARAMS = {
@@ -66,11 +74,13 @@ class QQMusicAdapter(BasePlatformAdapter):
         self._last_request_at = 0.0
         self._g_tk = 5381  # 未登录默认值
         # 用户搜索缓存: encrypt_uin → {nickname, avatar_url, encrypt_uin}
-        # 用于搜索结果直接返回资料，避免二次请求
         self._user_cache: dict[str, dict] = {}
         # SSR 页面缓存: uid → (html, timestamp)
-        # 避免 profile、歌单、events 重复请求同一页面
         self._ssr_page_cache: dict[str, tuple[str, float]] = {}
+        # 代理设置（用于 SSL 有问题的域名）
+        self._proxies = {}
+        if self.PROXY:
+            self._proxies = {"http": self.PROXY, "https": self.PROXY}
 
     @property
     def session(self) -> requests.Session:
@@ -81,6 +91,8 @@ class QQMusicAdapter(BasePlatformAdapter):
     def _build_session(self) -> requests.Session:
         """构建请求会话 (带 Cookie 和防盗链)"""
         s = requests.Session()
+        if self._proxies:
+            s.proxies.update(self._proxies)
         cookies = CredentialManager.load_cookies("qqmusic")
         if cookies:
             for key, value in cookies.items():
@@ -256,15 +268,22 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         Python requests 对某些 QQ 音乐域名 (i.y.qq.com, i2.y.qq.com)
         存在 SSL 握手问题 (SSLEOFError)，curl 可正常访问。
+        若配置了代理，会自动使用代理。
         """
         try:
             cmd = [
                 "curl", "-s", "--max-time", str(timeout),
+                "-k",  # 忽略 SSL 证书错误
                 "-L",  # 跟随重定向
                 "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
                 "-H", "Referer: https://y.qq.com/",
                 "-H", "Accept-Language: zh-CN,zh;q=0.9",
             ]
+            # 使用代理
+            if self._proxies:
+                proxy_url = self._proxies.get("https") or self._proxies.get("http")
+                if proxy_url:
+                    cmd.extend(["-x", proxy_url])
             # 传递当前会话的 Cookie
             cookie_str = self._get_curl_cookie_str()
             if cookie_str:
@@ -468,6 +487,7 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         唯一方式: 手机版 SSR 页面 (支持 uin 和 encrypt_uin)
         优先返回搜索缓存结果。
+        如果通过 fcg API 获取到关注/粉丝数，一并存入 extra。
         """
         uid = str(uid).strip()
         if not uid:
@@ -477,6 +497,12 @@ class QQMusicAdapter(BasePlatformAdapter):
         cached = self._user_cache.get(uid) or self._user_cache.get(uid + "**")
         if cached:
             avatar = cached.get("avatar_url", "") or ""
+            extra = {"uin": uid, "source": "user_cache", "encrypt_uin": cached.get("encrypt_uin", "")}
+            # 附加关注/粉丝数（如果有 fcg 缓存）
+            if cached.get("_follow_count"):
+                extra["follow_count"] = cached["_follow_count"]
+            if cached.get("_fan_count"):
+                extra["fan_count"] = cached["_fan_count"]
             return PlatformProfile(
                 platform="qqmusic",
                 uid=uid,
@@ -484,11 +510,22 @@ class QQMusicAdapter(BasePlatformAdapter):
                 avatar_url=avatar,
                 signature=cached.get("signature", ""),
                 gender=0,
-                extra={"uin": uid, "source": "user_cache", "encrypt_uin": cached.get("encrypt_uin", "")},
+                extra=extra,
             )
 
         # 手机版 SSR 页面
-        return self._get_profile_via_mobile_ssr(uid)
+        profile = self._get_profile_via_mobile_ssr(uid)
+
+        # 附加关注/粉丝数（通过 fcg API，仅对 encrypt_uin 可见）
+        if profile and not uid.isdigit():
+            fcg_stats = self._try_get_follow_count_via_fcg(uid)
+            if fcg_stats:
+                if profile.extra is None:
+                    profile.extra = {}
+                profile.extra["follow_count"] = fcg_stats.get("follow", 0)
+                profile.extra["fan_count"] = fcg_stats.get("fans", 0)
+
+        return profile
 
     @staticmethod
     def _extract_js_string(html: str, var_name: str) -> str:
@@ -987,6 +1024,40 @@ class QQMusicAdapter(BasePlatformAdapter):
             "follow_num": item.get("follow_num", 0),
         }
 
+    def _try_get_follow_count_via_fcg(self, uid: str) -> Optional[dict]:
+        """
+        通过 fcg_get_profile_homepage.fcg API 获取用户关注统计。
+
+        此 API 支持 encrypt_uin 用户（不含 reqfrom=1 参数时返回数据）。
+
+        Returns:
+            {"follow": int, "fans": int} 或 None
+        """
+        try:
+            url = (
+                f"{self.API_BASE_C6}/rsc/fcgi-bin/fcg_get_profile_homepage.fcg"
+                f"?cid=205360838&userid={quote(uid)}&g_tk=5381&format=json"
+            )
+            resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if data.get("code") != 0:
+                return None
+            tabs = data.get("data", {}).get("tabs", {})
+            relation = tabs.get("relation", {})
+            follow_num = relation.get("follownum", 0)
+            fan_num = relation.get("fannum", 0)
+            if follow_num > 0 or fan_num > 0:
+                return {"follow": follow_num, "fans": fan_num}
+            # 也可能是整数格式
+            if isinstance(relation, (int, float)):
+                return {"follow": int(relation), "fans": 0}
+            return None
+        except Exception as e:
+            print(f"[QQ音乐] fcg 获取关注数失败 ({uid}): {e}")
+            return None
+
     def _try_get_ssr_count(self, uid: str, field: str) -> Optional[int]:
         """
         尝试从 SSR 缓存中获取关注/粉丝等统计数字。
@@ -1023,7 +1094,8 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         支持分页查询。
         对于 encrypt_uin 用户，API 无法返回关注列表（需要真实 QQ 号），
-        但 SSR 页面有 FollowNum（关注总数），会以特殊标记返回。
+        仅可通过 fcg_get_profile_homepage API 获取关注总数(已存入 profile.extra.follow_count)。
+        此处返回空列表，避免破坏快照持久化流程。
         """
         uid = str(uid).strip()
         if not uid:
@@ -1035,19 +1107,14 @@ class QQMusicAdapter(BasePlatformAdapter):
             if uid.isdigit():
                 real_uin = uid
             else:
-                print(f"[QQ音乐] 关注列表: {uid} 是加密用户，尝试从 SSR 获取关注数")
-                # SSR 页面的 FollowNum
-                ssr_count = self._try_get_ssr_count(uid, "FollowNum")
-                if ssr_count is not None:
-                    print(f"[QQ音乐] SSR 关注数: {ssr_count}")
-                    return [{
-                        "_count_only": True,
-                        "count": ssr_count,
-                        "uid": uid,
-                        "nickname": f"关注了 {ssr_count} 人",
-                        "avatarUrl": "",
-                        "note": "QQ音乐隐藏了此用户的QQ号，无法获取详细关注列表",
-                    }]
+                # encrypt_uin: 无法获取详细列表，返回空（关注数已存于 profile）
+                fcg_stats = self._try_get_follow_count_via_fcg(uid)
+                if fcg_stats and fcg_stats.get("follow", 0) > 0:
+                    print(f"[QQ音乐] 关注列表: {uid} 是加密用户，关注数 {fcg_stats['follow']}")
+                else:
+                    ssr_count = self._try_get_ssr_count(uid, "FollowNum")
+                    if ssr_count is not None and ssr_count > 0:
+                        print(f"[QQ音乐] SSR 关注数: {ssr_count}")
                 return []
 
         # 分页获取所有关注
@@ -1084,10 +1151,11 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         支持分页查询。
         对于 encrypt_uin 用户，API 无法返回粉丝列表（需要真实 QQ 号），
-        但 SSR 页面有 FansNum（粉丝总数），会以特殊标记返回。
+        仅可通过 fcg API 获取粉丝总数(已存入 profile.extra.fan_count)。
+        此处返回空列表，避免破坏快照持久化流程。
 
         注意: QQ 音乐的粉丝 API (is_listen=1) 服务端不稳定，大 V 用户会超时，
-        此时返回空列表，但粉丝数可从 SSR 页面获取。
+        此时返回空列表，但粉丝数可从 fcg API 获取。
         """
         uid = str(uid).strip()
         if not uid:
@@ -1099,18 +1167,7 @@ class QQMusicAdapter(BasePlatformAdapter):
             if uid.isdigit():
                 real_uin = uid
             else:
-                print(f"[QQ音乐] 粉丝列表: {uid} 是加密用户，尝试从 SSR 获取粉丝数")
-                ssr_count = self._try_get_ssr_count(uid, "FansNum")
-                if ssr_count is not None:
-                    print(f"[QQ音乐] SSR 粉丝数: {ssr_count}")
-                    return [{
-                        "_count_only": True,
-                        "count": ssr_count,
-                        "uid": uid,
-                        "nickname": f"{ssr_count} 位粉丝",
-                        "avatarUrl": "",
-                        "note": "QQ音乐隐藏了此用户的QQ号，无法获取详细粉丝列表",
-                    }]
+                # encrypt_uin: 无法获取详细列表，返回空（粉丝数已存于 profile）
                 return []
 
         # 分页获取所有粉丝
