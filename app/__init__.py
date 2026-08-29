@@ -22,8 +22,8 @@ def create_app() -> Flask:
 
     app = Flask(
         __name__,
-        template_folder="templates",
-        static_folder="static",
+        static_folder="web",      # Vite 构建产物目录（frontend/ 执行 npm run build 生成）
+        static_url_path="",       # 静态资源挂根路径：/assets/...、/favicon.svg
     )
     app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 

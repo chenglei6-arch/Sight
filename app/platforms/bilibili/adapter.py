@@ -24,6 +24,11 @@ from app.credentials import CredentialManager
 from app.config import REQUEST_TIMEOUT, MAX_RETRIES
 
 
+def _dict(x) -> dict:
+    """B站 API 嵌套字段可能为显式 null，统一收敛为 dict，避免链式 .get 报错"""
+    return x if isinstance(x, dict) else {}
+
+
 class BilibiliAdapter(BasePlatformAdapter):
     """哔哩哔哩平台适配器"""
 
@@ -211,7 +216,12 @@ class BilibiliAdapter(BasePlatformAdapter):
             return None
 
         # 获取UP主统计数据
-        stat = self._get("/x/space/upstat", {"mid": uid})
+        stat = _dict(self._get("/x/space/upstat", {"mid": uid}))
+        archive = _dict(stat.get("archive"))
+        article = _dict(stat.get("article"))
+        vip = _dict(info.get("vip"))
+        official = _dict(info.get("official"))
+        live_room = _dict(info.get("live_room"))
 
         return PlatformProfile(
             platform="bilibili",
@@ -224,17 +234,17 @@ class BilibiliAdapter(BasePlatformAdapter):
             birthday=info.get("birthday", ""),
             join_time="",
             level=info.get("level", 0),
-            is_vip=info.get("vip", {}).get("status", 0) == 1,
-            vip_label="B站大会员" if info.get("vip", {}).get("status") == 1 else "",
+            is_vip=vip.get("status", 0) == 1,
+            vip_label="B站大会员" if vip.get("status") == 1 else "",
             extra={
                 "follower_count": info.get("follower", 0),
                 "following_count": info.get("following", 0),
-                "video_count": stat.get("archive", {}).get("view", 0) if stat else 0,
-                "article_count": stat.get("article", {}).get("view", 0) if stat else 0,
-                "likes": stat.get("likes", 0) if stat else 0,
-                "total_views": stat.get("archive", {}).get("view", 0) if stat else 0,
-                "official": info.get("official", {}).get("title", ""),
-                "live_status": info.get("live_room", {}).get("liveStatus", 0),
+                "video_count": archive.get("view", 0),
+                "article_count": article.get("view", 0),
+                "likes": stat.get("likes", 0),
+                "total_views": archive.get("view", 0),
+                "official": official.get("title", ""),
+                "live_status": live_room.get("liveStatus", 0),
             },
         )
 
@@ -329,10 +339,12 @@ class BilibiliAdapter(BasePlatformAdapter):
             for item in items:
                 if len(events) >= limit:
                     break
-                mod = item.get("modules", {})
-                desc = mod.get("module_dynamic", {}).get("desc") or {}
-                stat = mod.get("module_stat", {})
-                author = mod.get("module_author", {})
+                mod = _dict(item.get("modules"))
+                dyn = _dict(mod.get("module_dynamic"))
+                desc = _dict(dyn.get("desc"))
+                stat = _dict(mod.get("module_stat"))
+                author = _dict(mod.get("module_author"))
+                major = _dict(dyn.get("major"))
 
                 # 提取文字内容
                 text_parts = desc.get("text", "") if isinstance(desc, dict) and isinstance(desc.get("text"), str) else ""
@@ -343,11 +355,10 @@ class BilibiliAdapter(BasePlatformAdapter):
                     )
 
                 # 提取关联内容
-                major = mod.get("module_dynamic", {}).get("major", {})
                 media_title = ""
-                if major.get("archive"):
+                if _dict(major.get("archive")):
                     media_title = major["archive"].get("title", "")
-                elif major.get("article"):
+                elif _dict(major.get("article")):
                     media_title = major["article"].get("title", "")
 
                 type_str = type_map.get(item.get("type", ""), item.get("type", "动态"))
@@ -366,9 +377,9 @@ class BilibiliAdapter(BasePlatformAdapter):
                     media_title=media_title,
                     media_artist=author.get("name", ""),
                     extra={
-                        "likes": stat.get("like", {}).get("count", 0),
-                        "comments": stat.get("comment", {}).get("count", 0),
-                        "forwards": stat.get("forward", {}).get("count", 0),
+                        "likes": _dict(stat.get("like")).get("count", 0),
+                        "comments": _dict(stat.get("comment")).get("count", 0),
+                        "forwards": _dict(stat.get("forward")).get("count", 0),
                     },
                 ))
 

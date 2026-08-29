@@ -215,10 +215,19 @@ workshop13-sight/
 ## 技术栈
 
 - **后端**: Python 3, Flask, requests, PyExecJS
-- **前端**: 原生 JS + CSS（暗色主题，无框架依赖）
+- **前端**: Vue 3 + Vite（浅色主题，源码在 `frontend/`，构建产物 `app/web/` 已提交，后端无需 Node 即可运行）
 - **存储**: SQLite（`data/snapshots.db`）
 - **加密**: AES + RSA（网易云 weapi），SM3（抖音 a_bogus）
 - **反爬**: 请求间隔控制、指数退避、多策略降级
+
+### 前端开发
+
+```bash
+cd frontend
+npm install
+npm run dev     # 开发服务器 http://127.0.0.1:5173（/api 代理到 Flask 5000）
+npm run build   # 构建到 app/web/，由 Flask 托管
+```
 
 ---
 
