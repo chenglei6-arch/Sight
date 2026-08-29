@@ -88,6 +88,13 @@ class XhsAdapter(BasePlatformAdapter):
         """获取 PC Auth 实例（延迟初始化）"""
         if self._auth_pc is None:
             try:
+                # 修复导入路径：需要从 app.platforms.xhs 导入
+                import sys
+                from pathlib import Path
+                xhs_path = Path(__file__).parent
+                if str(xhs_path) not in sys.path:
+                    sys.path.insert(0, str(xhs_path))
+
                 from ref_xhs_pc.auth import XHSPcAuth
                 cookie_str = self._load_cookie_str()
                 if not cookie_str:
@@ -96,7 +103,9 @@ class XhsAdapter(BasePlatformAdapter):
                 self._auth_pc = XHSPcAuth.from_cookie(cookie_str)
                 print(f"[小红书] PC Auth 已加载")
             except Exception as e:
+                import traceback
                 print(f"[小红书] PC Auth 初始化失败: {e}")
+                traceback.print_exc()
                 return None
         return self._auth_pc
 
@@ -105,6 +114,12 @@ class XhsAdapter(BasePlatformAdapter):
         """获取 Creator Auth 实例（延迟初始化）"""
         if self._auth_creator is None:
             try:
+                import sys
+                from pathlib import Path
+                xhs_path = Path(__file__).parent
+                if str(xhs_path) not in sys.path:
+                    sys.path.insert(0, str(xhs_path))
+
                 from ref_xhs_creator.auth import XHSCreatorAuth
                 cookie_str = self._load_cookie_str()
                 if not cookie_str:
@@ -113,7 +128,9 @@ class XhsAdapter(BasePlatformAdapter):
                 self._auth_creator = XHSCreatorAuth.from_cookie(cookie_str)
                 print(f"[小红书] Creator Auth 已加载")
             except Exception as e:
+                import traceback
                 print(f"[小红书] Creator Auth 初始化失败: {e}")
+                traceback.print_exc()
                 return None
         return self._auth_creator
 
@@ -122,11 +139,19 @@ class XhsAdapter(BasePlatformAdapter):
         """获取 PC API 实例"""
         if self._api_pc is None and self.auth_pc:
             try:
+                import sys
+                from pathlib import Path
+                xhs_path = Path(__file__).parent
+                if str(xhs_path) not in sys.path:
+                    sys.path.insert(0, str(xhs_path))
+
                 from ref_apis.xhs_pc_apis import XHS_Apis
                 self._api_pc = XHS_Apis(self.auth_pc).bootstrap()
                 print(f"[小红书] PC API 已初始化")
             except Exception as e:
+                import traceback
                 print(f"[小红书] PC API 初始化失败: {e}")
+                traceback.print_exc()
                 return None
         return self._api_pc
 
@@ -135,11 +160,19 @@ class XhsAdapter(BasePlatformAdapter):
         """获取 Creator API 实例"""
         if self._api_creator is None and self.auth_creator:
             try:
+                import sys
+                from pathlib import Path
+                xhs_path = Path(__file__).parent
+                if str(xhs_path) not in sys.path:
+                    sys.path.insert(0, str(xhs_path))
+
                 from ref_apis.xhs_creator_apis import XHS_Creator_Apis
                 self._api_creator = XHS_Creator_Apis(self.auth_creator).bootstrap()
                 print(f"[小红书] Creator API 已初始化")
             except Exception as e:
+                import traceback
                 print(f"[小红书] Creator API 初始化失败: {e}")
+                traceback.print_exc()
                 return None
         return self._api_creator
 
