@@ -1,6 +1,6 @@
 # 📊 多平台用户数据监控
 
-实时采集 **网易云音乐、哔哩哔哩、抖音、QQ音乐、微博、原神** 多平台用户公开数据，通过快照对比推断活动时间线，生成统一数据报告。
+实时采集 **网易云音乐、哔哩哔哩、抖音、QQ音乐、微博、原神、小红书** 多平台用户公开数据，通过快照对比推断活动时间线，生成统一数据报告。
 
 > 项目代号：**workshop13-sight**
 
@@ -26,6 +26,7 @@ python run.py
 | QQ音乐 | `credentials/y.qq_cookie.txt` | `uin`、`qqmusic_key` |
 | 微博 | `credentials/weibo_cookie.txt` | `SUB`、`SUBP` |
 | 原神 | `credentials/genshin_cookie.txt` | 米游社 `ltuid_v2`、`ltoken_v2` |
+| 小红书 | `credentials/xhs_cookie.txt` | `a1`、`web_session` |
 
 > 不配置 Cookie 也能启动，部分平台功能受限。
 
@@ -41,9 +42,11 @@ python run.py
 | 🎵 QQ音乐 | `qqmusic/` | ✅ | 歌单 | ❌ | ✅ | ✅ |
 | 💬 微博 | `weibo/` | ✅ | 微博 | ✅ | ✅ | ✅ |
 | ⚔️ 原神 | `genshin/` | ✅ | 角色 | ❌¹ | ❌² | ❌² |
+| 📕 小红书 | `xhs/` | ✅ | 笔记 | ✅ | ❌³ | ❌³ |
 
 > ¹ 原神深渊数据因米游社风控不可用
 > ² 游戏内没有关注/粉丝系统
+> ³ 小红书关注/粉丝列表需特殊权限
 
 ### 原神特殊说明
 

@@ -22,6 +22,7 @@ class CredentialManager:
         "qqmusic": "qqmusic_cookie.txt",
         "weibo": "weibo_cookie.txt",
         "genshin": "genshin_cookie.txt",
+        "xhs": "xhs_cookie.txt",
     }
 
     # 文件名别名（兼容不同拼写）
@@ -113,6 +114,7 @@ class CredentialManager:
             "qqmusic": "QQ音乐",
             "weibo": "微博",
             "genshin": "原神",
+            "xhs": "小红书",
         }
         return names.get(platform, platform)
 

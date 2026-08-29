@@ -216,6 +216,39 @@ export const PLATFORMS = [
       return out
     },
   },
+  {
+    id: 'xhs',
+    name: '小红书',
+    color: '#ff2442',
+    searchPlaceholder: '输入小红书号或昵称搜索',
+    uidHint: '小红书 user_id，如 5d8c0000000000001000xxxx',
+    contentLabel: '笔记',
+    contentKind: 'note',
+    hasDetail: false,
+    hasRecords: false,
+    hasEvents: true,
+    hasSocial: false,
+    looksLikeUid: (s) => /^[a-f0-9]{24}$/.test(s),
+    resultUid: (u) => String(u.uid ?? ''),
+    itemLink: (it) => (it.item_id ? `https://www.xiaohongshu.com/explore/${it.item_id}` : ''),
+    vipLabel: () => '',
+    metaLine: (p) => {
+      const e = p.extra || {}
+      const out = []
+      if (e.red_id) out.push(`小红书号：${e.red_id}`)
+      if (p.location) out.push(p.location)
+      return out
+    },
+    stats: (p) => {
+      const e = p.extra || {}
+      const out = []
+      stat(out, '粉丝', e.fans)
+      stat(out, '关注', e.follows)
+      stat(out, '获赞与收藏', e.interaction)
+      stat(out, '笔记', e.notes_count)
+      return out
+    },
+  },
 ]
 
 export const PLATFORM_MAP = Object.fromEntries(PLATFORMS.map((p) => [p.id, p]))

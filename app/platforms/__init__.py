@@ -63,6 +63,12 @@ def get_adapter(platform_id: str) -> Optional["BasePlatformAdapter"]:
         _registry[platform_id] = adapter
         return adapter
 
+    if platform_id == "xhs":
+        from app.platforms.xhs.adapter import XhsAdapter
+        adapter = XhsAdapter()
+        _registry[platform_id] = adapter
+        return adapter
+
     return None
 
 
