@@ -227,6 +227,36 @@ retry>=0.9.2         # 重试机制
 pip install curl_cffi==0.15.0
 ```
 
+### 问题：Python 3.14 + curl_cffi 兼容性问题
+
+**错误信息:**
+```
+TypeError: the first argument must be callable
+```
+
+**原因:** Python 3.14 的 `asyncio.windows_utils.Popen` 与 `curl_cffi 0.15.0` 存在兼容性冲突。
+
+**解决方案（选其一）:**
+
+1. **推荐：使用 Python 3.10-3.12**
+   ```bash
+   # 使用 pyenv 或 conda 切换 Python 版本
+   pyenv install 3.12.0
+   pyenv local 3.12.0
+   pip install -r requirements.txt
+   ```
+
+2. **等待 curl_cffi 更新** 至兼容 Python 3.14 的版本
+
+3. **临时方案：使用虚拟环境**
+   ```bash
+   conda create -n sight python=3.12
+   conda activate sight
+   pip install -r requirements.txt
+   ```
+
+**功能影响:** 在兼容性问题解决前，小红书模块无法初始化，但不影响其他平台功能。
+
 ### 问题：`401 Unauthorized` / `403 Forbidden`
 
 - Cookie 已过期，需要重新获取

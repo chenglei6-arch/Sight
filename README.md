@@ -8,6 +8,12 @@
 
 ## 快速开始
 
+**环境要求:**
+- Python 3.10 - 3.12（推荐 3.12）
+- Node.js 20+ （小红书签名算法需要）
+
+> ⚠️ 小红书模块暂不支持 Python 3.14（curl_cffi 兼容性问题）
+
 ```bash
 pip install -r requirements.txt
 python run.py
