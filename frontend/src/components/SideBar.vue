@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import Icon from './ui/Icon.vue'
 import CollectorPanel from './CollectorPanel.vue'
-import { state, setView } from '../store'
+import { state, setView, openSavedGraph, removeSavedGraph } from '../store'
 import { PLATFORMS } from '../platforms'
 
 const items = computed(() =>
@@ -17,6 +17,17 @@ const items = computed(() =>
     return { ...p, statusColor, hasMeta: !!meta }
   })
 )
+
+// 已保存图谱条目的悬浮说明：关键词 + 规模 + 最近更新时间
+function graphTitle(g) {
+  const t = String(g.updated_at || '').slice(5, 16).replace('T', ' ')
+  return `${g.name}\n关键词「${g.keyword || '-'}」 · ${g.node_count} 用户 · ${g.edge_count} 条关系\n更新于 ${t}（点击调出，无需重新搜索）`
+}
+
+async function removeGraph(g) {
+  if (!window.confirm(`确定删除图谱「${g.name}」吗？删除后不可恢复。`)) return
+  await removeSavedGraph(g.id)
+}
 </script>
 
 <template>
@@ -52,6 +63,31 @@ const items = computed(() =>
         <span class="nav-dot nav-dot-icon"><Icon name="clock" :size="14" /></span>
         <span class="nav-name">活动时间线</span>
       </button>
+      <button
+        class="nav-item"
+        :class="{ active: state.view === 'graph' && !state.activeGraphId }"
+        @click="setView('graph')"
+      >
+        <span class="nav-dot nav-dot-icon"><Icon name="users" :size="14" /></span>
+        <span class="nav-name">关系图谱</span>
+      </button>
+
+      <!-- 已保存的关系图谱：点击从数据库调出，不重新请求平台数据 -->
+      <button
+        v-for="g in state.savedGraphs"
+        :key="'graph-' + g.id"
+        class="nav-item nav-graph"
+        :class="{ active: state.view === 'graph' && state.activeGraphId === g.id }"
+        :title="graphTitle(g)"
+        @click="openSavedGraph(g.id)"
+      >
+        <span class="nav-dot nav-dot-icon nav-graph-icon"><Icon name="share2" :size="11" /></span>
+        <span class="nav-name">{{ g.name }}</span>
+        <span class="nav-graph-del" title="删除该图谱" @click.stop="removeGraph(g)">
+          <Icon name="x" :size="11" />
+        </span>
+      </button>
+      <div v-if="state.savedGraphsError" class="nav-graph-err">{{ state.savedGraphsError }}</div>
     </nav>
 
     <div class="sidebar-foot">
@@ -174,6 +210,49 @@ const items = computed(() =>
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
+}
+
+/* 已保存图谱条目：比主导航小一号，挂在"关系图谱"下面 */
+.nav-graph {
+  padding: 6px 10px 6px 12px;
+  margin-left: 14px;
+  font-size: 12.5px;
+  width: auto;
+}
+
+.nav-graph-icon {
+  width: 17px;
+  height: 17px;
+  margin: -4px;
+  border-radius: 5px;
+}
+
+.nav-graph-del {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.nav-graph-del:hover {
+  background: var(--danger-soft, rgba(213, 55, 47, 0.12));
+  color: var(--danger, #d5372f);
+}
+
+.nav-graph:hover .nav-graph-del {
+  display: inline-flex;
+}
+
+.nav-graph-err {
+  margin: 4px 10px 0 26px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--danger, #d5372f);
+  word-break: break-all;
 }
 
 .sidebar-foot {

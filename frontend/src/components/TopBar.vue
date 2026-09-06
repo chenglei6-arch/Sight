@@ -8,7 +8,10 @@ import {
 } from '../store'
 
 const platform = computed(() => currentPlatform())
-const title = computed(() => (platform.value ? platform.value.name : '活动时间线'))
+const VIEW_TITLES = { timeline: '活动时间线', graph: '关系图谱' }
+const title = computed(() =>
+  platform.value ? platform.value.name : VIEW_TITLES[state.view] || 'Sight'
+)
 
 const updatedAt = computed(() => {
   if (state.view === 'timeline') {

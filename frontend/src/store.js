@@ -76,6 +76,10 @@ export const state = reactive({
   editEntry: null, // { id, summary, detail }
   autoRefresh: false,
   qrOpen: false,
+  savedGraphs: [], // 已保存的关系图谱元信息（侧边栏列表，不含节点数据）
+  activeGraphId: null, // 当前在图谱视图里载入的持久化图谱 id
+  pendingGraph: null, // 待 ViewGraph 消费的持久化图谱载荷（点击侧边栏后设置）
+  savedGraphsError: '', // 图谱保存/打开/删除失败提示（侧边栏展示）
 })
 
 for (const p of PLATFORMS) state.data[p.id] = blankPlatformData()
@@ -83,7 +87,7 @@ for (const p of PLATFORMS) state.data[p.id] = blankPlatformData()
 // ==================== 视图切换 ====================
 
 function isValidView(v) {
-  return v === 'timeline' || !!PLATFORM_MAP[v]
+  return v === 'timeline' || v === 'graph' || !!PLATFORM_MAP[v]
 }
 
 function applyHash() {
@@ -137,17 +141,14 @@ async function chainLoadOtherPlatforms() {
 }
 
 export function loadCurrentView() {
-  if (state.view === 'timeline') {
-    loadTimeline()
-  } else {
-    loadPlatform(state.view)
-  }
+  if (state.view === 'timeline') loadTimeline()
+  else if (state.view !== 'graph') loadPlatform(state.view) // graph 数据由搜索触发，无需加载
 }
 
 export async function refreshCurrentView() {
   if (state.view === 'timeline') {
     await loadTimeline({ force: true })
-  } else {
+  } else if (state.view !== 'graph') {
     await loadPlatform(state.view, { force: true })
     if (state.view) await loadTimeline({ force: true }) // 平台数据落库后同步时间线
   }
@@ -335,6 +336,45 @@ export async function collectOnce(intervalMinutes) {
   }
 }
 
+// ==================== 关系图谱持久化 ====================
+
+/** 刷新侧边栏的已保存图谱列表 */
+export async function loadSavedGraphs() {
+  try {
+    state.savedGraphs = (await api.get('/graph/saved')) || []
+    if (state.savedGraphs.length) state.savedGraphsError = ''
+  } catch (e) {
+    state.savedGraphsError = `图谱列表加载失败：${e.message}`
+  }
+}
+
+/**
+ * 打开一张已保存图谱：从后端 SQLite 取完整节点/边数据交给 ViewGraph 渲染，
+ * 不再请求各平台搜索接口。
+ */
+export async function openSavedGraph(id) {
+  try {
+    const g = await api.get(`/graph/saved/${id}`)
+    state.savedGraphsError = ''
+    state.activeGraphId = g.id
+    state.pendingGraph = g // 先备好数据再切视图，ViewGraph 挂载/监听到后立即消费
+    if (state.view !== 'graph') setView('graph')
+  } catch (e) {
+    state.savedGraphsError = `打开图谱失败：${e.message}`
+  }
+}
+
+export async function removeSavedGraph(id) {
+  try {
+    await api.del(`/graph/saved/${id}`)
+    if (state.activeGraphId === id) state.activeGraphId = null
+    state.savedGraphsError = ''
+  } catch (e) {
+    state.savedGraphsError = `删除失败：${e.message}`
+  }
+  await loadSavedGraphs()
+}
+
 // ==================== QQ 音乐扫码登录 ====================
 
 export function openQrLogin() {
@@ -389,4 +429,5 @@ export async function initStore() {
   // 3. 其余平台后台串行加载（写快照供时间线使用）
   chainLoadOtherPlatforms()
   refreshCollectorStatus()
+  loadSavedGraphs()
 }

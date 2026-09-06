@@ -86,6 +86,18 @@ class DataStore:
                 CREATE INDEX IF NOT EXISTS idx_timeline_lookup
                 ON timeline(platform, uid, created_at DESC)
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS graphs (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT    NOT NULL UNIQUE,
+                    keyword     TEXT    DEFAULT '',
+                    node_count  INTEGER DEFAULT 0,
+                    edge_count  INTEGER DEFAULT 0,
+                    data_json   TEXT    NOT NULL,
+                    created_at  TEXT    NOT NULL,
+                    updated_at  TEXT    NOT NULL
+                )
+            """)
             conn.commit()
 
     # ==================== 哈希计算 ====================
@@ -454,6 +466,68 @@ class DataStore:
         """删除一条时间线条目。返回 True 表示删除成功。"""
         with self._connect() as conn:
             conn.execute("DELETE FROM timeline WHERE id=?", (entry_id,))
+            conn.commit()
+            return conn.total_changes > 0
+
+    # ==================== 关系图谱持久化 ====================
+
+    def save_graph(self, name: str, keyword: str, data: dict) -> int:
+        """
+        按名称保存一张关系图谱（节点/边完整 JSON）；同名图谱覆盖更新。
+
+        Returns:
+            图谱 id（新建或被更新的那条记录）
+        """
+        now = _now_iso()
+        payload = json.dumps(data, ensure_ascii=False)
+        node_count = len(data.get("nodes") or [])
+        edge_count = len(data.get("edges") or [])
+        with self._connect() as conn:
+            row = conn.execute("SELECT id FROM graphs WHERE name=?", (name,)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE graphs SET keyword=?, data_json=?, node_count=?, edge_count=?, updated_at=? "
+                    "WHERE id=?",
+                    (keyword, payload, node_count, edge_count, now, row["id"]),
+                )
+                graph_id = row["id"]
+            else:
+                cur = conn.execute(
+                    "INSERT INTO graphs (name, keyword, data_json, node_count, edge_count, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (name, keyword, payload, node_count, edge_count, now, now),
+                )
+                graph_id = cur.lastrowid
+            conn.commit()
+        return graph_id
+
+    def list_graphs(self) -> list[dict]:
+        """列出所有已保存图谱的元信息（不含节点/边数据），按更新时间倒序。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, name, keyword, node_count, edge_count, created_at, updated_at "
+                "FROM graphs ORDER BY updated_at DESC, id DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_graph(self, graph_id: int) -> Optional[dict]:
+        """获取一张图谱的完整数据（元信息 + data 字段里的 nodes/edges）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, name, keyword, data_json, node_count, edge_count, created_at, updated_at "
+                "FROM graphs WHERE id=?",
+                (graph_id,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["data"] = json.loads(result.pop("data_json"))
+        return result
+
+    def delete_graph(self, graph_id: int) -> bool:
+        """删除一张已保存图谱。返回 True 表示删除成功。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM graphs WHERE id=?", (graph_id,))
             conn.commit()
             return conn.total_changes > 0
 

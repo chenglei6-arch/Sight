@@ -4,6 +4,7 @@ import SideBar from './components/SideBar.vue'
 import TopBar from './components/TopBar.vue'
 import ViewPlatform from './components/ViewPlatform.vue'
 import ViewTimeline from './components/ViewTimeline.vue'
+import ViewGraph from './components/ViewGraph.vue'
 import DetailModal from './components/DetailModal.vue'
 import QrLoginModal from './components/QrLoginModal.vue'
 import EditEntryModal from './components/EditEntryModal.vue'
@@ -19,6 +20,7 @@ onMounted(initStore)
       <TopBar />
       <main class="app-content">
         <ViewTimeline v-if="state.view === 'timeline'" />
+        <ViewGraph v-else-if="state.view === 'graph'" />
         <!-- key 保证切换平台时子组件状态完全重建 -->
         <ViewPlatform v-else :key="state.view" />
       </main>
