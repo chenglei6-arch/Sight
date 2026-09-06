@@ -11,39 +11,47 @@
   - 备选: 若存在 dy_ab.js (需 jsrsasign), 优先使用
 """
 import os
-import subprocess
 import sys
-from functools import partial
+import threading
 from pathlib import Path
 
-subprocess.Popen = partial(subprocess.Popen, encoding="utf-8")
 import execjs
+import subprocess
+from functools import partial
+import execjs._external_runtime as _execjs_external_runtime
+
+_execjs_external_runtime.Popen = partial(subprocess.Popen, encoding="utf-8")
 
 _JS_DIR = Path(__file__).parent
 _CTX = None
 _CTX_AB = None  # dy_ab.js 上下文
+_CTX_LOCK = threading.Lock()
 
 
 def _get_ctx():
-    """加载 douyin_sign.js (自包含, 无需 npm)"""
+    """加载 douyin_sign.js (自包含, 无需 npm)。双检锁：graph 接口会并发调用"""
     global _CTX
     if _CTX is None:
-        js_file = _JS_DIR / "douyin_sign.js"
-        if js_file.exists():
-            _CTX = execjs.compile(js_file.read_text("utf-8"))
+        with _CTX_LOCK:
+            if _CTX is None:
+                js_file = _JS_DIR / "douyin_sign.js"
+                if js_file.exists():
+                    _CTX = execjs.compile(js_file.read_text("utf-8"))
     return _CTX
 
 
 def _get_ab_ctx():
-    """加载 dy_ab.js (优先, 需 jsrsasign)"""
+    """加载 dy_ab.js (优先, 需 jsrsasign)。双检锁：graph 接口会并发调用"""
     global _CTX_AB
     if _CTX_AB is None:
-        js_file = _JS_DIR / "dy_ab.js"
-        if js_file.exists():
-            try:
-                _CTX_AB = execjs.compile(js_file.read_text("utf-8"))
-            except Exception as e:
-                print(f"[a_bogus] dy_ab.js 加载失败: {e}")
+        with _CTX_LOCK:
+            if _CTX_AB is None:
+                js_file = _JS_DIR / "dy_ab.js"
+                if js_file.exists():
+                    try:
+                        _CTX_AB = execjs.compile(js_file.read_text("utf-8"))
+                    except Exception as e:
+                        print(f"[a_bogus] dy_ab.js 加载失败: {e}")
     return _CTX_AB
 
 

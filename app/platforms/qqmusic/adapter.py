@@ -421,7 +421,7 @@ class QQMusicAdapter(BasePlatformAdapter):
             raw = self._api_post_json("/cgi-bin/musicu.fcg", body)
         except Exception as e:
             print(f"[QQ音乐] musicu.fcg 搜索失败: {e}")
-            return []
+            raise
 
         if not raw:
             return []

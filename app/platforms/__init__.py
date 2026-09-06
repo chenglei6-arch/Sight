@@ -72,6 +72,11 @@ def get_adapter(platform_id: str) -> Optional["BasePlatformAdapter"]:
     return None
 
 
+def reset_adapter(platform_id: str):
+    """丢弃已初始化的适配器实例（更新 Cookie 后调用，下次 get_adapter 重新加载凭证）"""
+    _registry.pop(platform_id, None)
+
+
 def list_platforms() -> list[dict]:
     """列出所有可用平台"""
     from app.credentials import CredentialManager

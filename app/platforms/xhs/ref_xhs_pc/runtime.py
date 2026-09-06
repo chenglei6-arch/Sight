@@ -18,7 +18,7 @@ from typing import Any, Mapping, Optional
 
 _JS_DIR = os.path.join(os.path.dirname(__file__), 'js')
 _CORE_JS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)), 'xhs_core', 'js',
+    os.path.dirname(os.path.dirname(__file__)), 'ref_xhs_core', 'js',
 )
 _B1_JS = os.path.join(_CORE_JS_DIR, 'b1.js')
 _SIGN_JS = os.path.join(_CORE_JS_DIR, 'sign.js')

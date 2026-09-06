@@ -44,7 +44,7 @@ async function doSearch(kw) {
     results.value = Array.isArray(list) ? list : []
     // 仅一条结果时直接选中，少点一次
     if (results.value.length === 1) {
-      select(props.platform.resultUid(results.value[0]), results.value[0].nickname)
+      select(platform.resultUid(results.value[0]), results.value[0].nickname)
       return
     }
   } catch (e) {

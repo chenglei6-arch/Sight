@@ -28,6 +28,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -60,9 +61,26 @@ class DouyinAdapter(BasePlatformAdapter):
         super().__init__(credentials)
         self._auth: DouyinAuth | None = None
         self._last_request_at = 0.0
+        # /graph 接口会从多个线程并发调用本适配器，限流必须串行化
+        self._rl_lock = threading.Lock()
         self._session: requests.Session | None = None
-        # 缓存: uid -> {"nickname": ..., "sec_uid": ..., "uid": ...}
+        # 缓存: uid -> {"nickname": ..., "sec_uid": ..., "uid": ..., "_cached_at": ts}
         self._user_cache: dict[str, dict] = {}
+
+    # ==================== 用户信息缓存（TTL 30 分钟） ====================
+
+    USER_CACHE_TTL = 30 * 60  # 粉丝数/作品数等随 raw_user 一起缓存，过期必须重拉
+
+    def _cache_get_user(self, uid: str) -> Optional[dict]:
+        info = self._user_cache.get(uid)
+        if info and time.time() - info.get("_cached_at", 0) < self.USER_CACHE_TTL:
+            return info
+        return None
+
+    def _cache_set_user(self, uid: str, info: dict) -> dict:
+        info["_cached_at"] = time.time()
+        self._user_cache[uid] = info
+        return info
 
     # ==================== 认证 ====================
 
@@ -133,12 +151,13 @@ class DouyinAdapter(BasePlatformAdapter):
     # ==================== 限速 ====================
 
     def _rate_limit(self):
-        """请求间隔，防止触发反爬"""
-        now = time.time()
-        elapsed = now - self._last_request_at
-        if elapsed < 2.0:
-            time.sleep(2.0 - elapsed + random.uniform(0, 0.5))
-        self._last_request_at = time.time()
+        """请求间隔，防止触发反爬。持锁 sleep：并发线程排队通过，保证请求间隔成立"""
+        with self._rl_lock:
+            now = time.time()
+            elapsed = now - self._last_request_at
+            if elapsed < 2.0:
+                time.sleep(2.0 - elapsed + random.uniform(0, 0.5))
+            self._last_request_at = time.time()
 
     # ==================== 工具方法 ====================
 
@@ -164,9 +183,10 @@ class DouyinAdapter(BasePlatformAdapter):
 
         返回: {uid, sec_uid, nickname, ...} 或 None
         """
-        # 检查缓存
-        if uid in self._user_cache:
-            return self._user_cache[uid]
+        # 检查缓存（USER_CACHE_TTL 内有效，过期重新拉取保证数据新鲜）
+        cached = self._cache_get_user(uid)
+        if cached:
+            return cached
 
         # 策略1: 通过 get_user_info API 查询
         # get_user_info 已增强：对数字 UID 会自动添加 user_id 参数
@@ -184,8 +204,7 @@ class DouyinAdapter(BasePlatformAdapter):
                     "avatar_url": self._extract_avatar_url(user),
                     "raw_user": user,
                 }
-                self._user_cache[uid] = info
-                return info
+                return self._cache_set_user(uid, info)
         except Exception as e:
             print(f"[抖音] _resolve_user_info({uid}) get_user_info 请求失败: {e}")
 
@@ -196,8 +215,7 @@ class DouyinAdapter(BasePlatformAdapter):
                 if my_uid == uid:
                     sec_uid = DouyinAPI.get_my_sec_uid(self.auth)
                     info = {"uid": uid, "sec_uid": sec_uid, "nickname": "", "avatar_url": ""}
-                    self._user_cache[uid] = info
-                    return info
+                    return self._cache_set_user(uid, info)
             except Exception:
                 pass
 
@@ -282,7 +300,7 @@ class DouyinAdapter(BasePlatformAdapter):
             return results
         except Exception as e:
             print(f"[抖音] search_user 失败: {e}")
-            return []
+            raise  # 带真实原因上抛（Cookie 失效/风控等），由调用方决定如何展示
 
     # ==================== 用户资料 ====================
 
@@ -315,7 +333,7 @@ class DouyinAdapter(BasePlatformAdapter):
                     "avatar_url": self._extract_avatar_url(raw_user),
                     "raw_user": raw_user,
                 }
-                self._user_cache[uid] = user_info
+                self._cache_set_user(uid, user_info)
 
             raw_user = user_info.get("raw_user", {})
             if not raw_user:

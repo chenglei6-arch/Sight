@@ -17,7 +17,7 @@ from ref_xhs_core.runtime import generate_websectiga
 
 
 _ROOT = os.path.dirname(os.path.dirname(__file__))
-_CORE_JS_DIR = os.path.join(_ROOT, 'xhs_core', 'js')
+_CORE_JS_DIR = os.path.join(_ROOT, 'ref_xhs_core', 'js')
 _CREATOR_JS_DIR = os.path.join(os.path.dirname(__file__), 'js')
 _B1_JS = os.path.join(_CORE_JS_DIR, 'b1.js')
 _SIGN_JS = os.path.join(_CORE_JS_DIR, 'sign.js')

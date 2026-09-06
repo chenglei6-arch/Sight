@@ -16,6 +16,7 @@
 """
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -54,6 +55,8 @@ class XhsAdapter(BasePlatformAdapter):
         self._api_pc = None
         self._api_creator = None
         self._last_request_at = 0.0
+        # /graph 接口会从多个线程并发调用本适配器，限流必须串行化
+        self._rl_lock = threading.Lock()
 
     # ==================== 凭证加载 ====================
 
@@ -179,12 +182,13 @@ class XhsAdapter(BasePlatformAdapter):
     # ==================== 限速 ====================
 
     def _rate_limit(self):
-        """请求间隔，防止触发反爬"""
-        now = time.time()
-        elapsed = now - self._last_request_at
-        if elapsed < 1.5:
-            time.sleep(1.5 - elapsed)
-        self._last_request_at = time.time()
+        """请求间隔，防止触发反爬。持锁 sleep：并发线程排队通过，保证请求间隔成立"""
+        with self._rl_lock:
+            now = time.time()
+            elapsed = now - self._last_request_at
+            if elapsed < 1.5:
+                time.sleep(1.5 - elapsed)
+            self._last_request_at = time.time()
 
     # ==================== 状态检查 ====================
 
@@ -212,10 +216,11 @@ class XhsAdapter(BasePlatformAdapter):
                 success, msg, res = self.api_pc.get_user_me()
                 if success and res:
                     data = res.get("data", {})
+                    basic = data.get("basic_info") or data
                     return {
-                        "uid": data.get("user_id", ""),
-                        "nickname": data.get("nickname", ""),
-                        "avatarUrl": data.get("image", ""),
+                        "uid": basic.get("user_id", ""),
+                        "nickname": basic.get("nickname", ""),
+                        "avatarUrl": basic.get("images") or basic.get("image", ""),
                     }
             elif self.mode == "creator" and self.api_creator:
                 self._rate_limit()
@@ -235,29 +240,35 @@ class XhsAdapter(BasePlatformAdapter):
     # ==================== 用户搜索 ====================
 
     def search_user(self, keyword: str, limit: int = 20) -> list[dict]:
-        """搜索用户"""
+        """搜索用户（失败时抛出带原因的异常，由调用方展示）"""
         try:
             if not self.api_pc:
-                return []
+                raise RuntimeError("小红书客户端未初始化（请检查 Cookie 是否已配置/有效）")
             self._rate_limit()
             success, msg, res = self.api_pc.search_some_user(keyword, limit)
-            if not success or not res:
+            if not success:
+                raise RuntimeError(f"小红书搜索失败: {msg}")
+            if not res:
                 return []
 
             results = []
-            items = res.get("items", [])
+            # XHS_Apis.search_some_user returns the accumulated list directly.
+            # Keep support for the raw response shape for compatibility.
+            items = res if isinstance(res, list) else res.get("items", [])
             for item in items:
-                user = item.get("user", {})
+                if not isinstance(item, dict):
+                    continue
+                user = item.get("user") or item
                 results.append({
-                    "uid": user.get("user_id", ""),
-                    "nickname": user.get("nickname", ""),
-                    "avatarUrl": user.get("avatar", ""),
-                    "signature": user.get("desc", ""),
+                    "uid": user.get("user_id") or user.get("id", ""),
+                    "nickname": user.get("nickname") or user.get("nick_name") or user.get("name", ""),
+                    "avatarUrl": user.get("avatar") or user.get("images") or user.get("image", ""),
+                    "signature": user.get("desc") or user.get("description") or user.get("sub_title", ""),
                 })
             return results
         except Exception as e:
             print(f"[小红书] search_user 失败: {e}")
-            return []
+            raise
 
     # ==================== 用户资料 ====================
 
@@ -272,21 +283,50 @@ class XhsAdapter(BasePlatformAdapter):
                 return None
 
             data = res.get("data", {})
+            basic = data.get("basic_info") or data
+            interactions = data.get("interactions") or []
+            interaction_counts = {}
+            for index, interaction in enumerate(interactions):
+                if not isinstance(interaction, dict):
+                    continue
+                key = interaction.get("type") or interaction.get("name")
+                count = interaction.get("count", 0)
+                if key:
+                    interaction_counts[str(key)] = count
+                # Older responses do not include a type; preserve their order.
+                if index == 0:
+                    interaction_counts.setdefault("follows", count)
+                elif index == 1:
+                    interaction_counts.setdefault("fans", count)
+                elif index == 2:
+                    interaction_counts.setdefault("interaction", count)
+
+            # XHS 编码 0=男 1=女；字段缺失（未公开）时用 -1 兜底，归为未知而非男
+            gender_value = basic.get("gender", -1)
+            if isinstance(gender_value, str):
+                gender_key = gender_value.lower()
+                gender = 1 if gender_key in {"male", "man", "男"} else 2 if gender_key in {"female", "woman", "女"} else 0
+            elif gender_value == 0:
+                gender = 1
+            elif gender_value == 1:
+                gender = 2
+            else:
+                gender = 0
             return PlatformProfile(
                 platform="xhs",
                 uid=uid,
-                nickname=data.get("nickname", ""),
-                avatar_url=data.get("image", ""),
-                background_url=data.get("imageb", ""),
-                signature=data.get("desc", ""),
-                gender=1 if data.get("gender") == "male" else (2 if data.get("gender") == "female" else 0),
-                location=data.get("location", ""),
+                nickname=basic.get("nickname", ""),
+                avatar_url=basic.get("images") or basic.get("image", ""),
+                background_url=basic.get("imageb", ""),
+                signature=basic.get("desc", ""),
+                gender=gender,
+                location=basic.get("location") or basic.get("ip_location", ""),
                 extra={
-                    "red_id": data.get("red_id", ""),
-                    "follows": data.get("follows", 0),
-                    "fans": data.get("fans", 0),
-                    "interaction": data.get("interaction", 0),
-                    "notes_count": data.get("notes_count", 0),
+                    "red_id": basic.get("red_id", ""),
+                    "follows": interaction_counts.get("follows", basic.get("follows", 0)),
+                    "fans": interaction_counts.get("fans", basic.get("fans", 0)),
+                    "interaction": interaction_counts.get("interaction", basic.get("interaction", 0)),
+                    "notes_count": basic.get("notes_count", 0),
                 },
             )
         except Exception as e:
@@ -311,19 +351,31 @@ class XhsAdapter(BasePlatformAdapter):
             items = []
             notes = res.get("notes", []) if isinstance(res, dict) else res
             for note in notes:
+                if not isinstance(note, dict):
+                    continue
+                interact = note.get("interact_info") or {}
+                cover = note.get("cover") or {}
+                note_id = note.get("note_id") or note.get("id", "")
+                title = note.get("display_title") or note.get("title") or "无标题"
+                create_time = note.get("time", note.get("create_time", ""))
+                user = note.get("user") or {}
                 items.append(ContentItem(
-                    item_id=note.get("note_id", ""),
-                    title=note.get("title", "无标题")[:200],
-                    cover_url=note.get("cover", {}).get("url_default", "") if isinstance(note.get("cover"), dict) else "",
+                    item_id=note_id,
+                    title=str(title)[:200],
+                    cover_url=cover.get("url_default", "") if isinstance(cover, dict) else "",
                     view_count=note.get("view_count", 0),
                     description=note.get("desc", "")[:200],
                     is_owner=True,
+                    creator=user.get("nickname", "") if isinstance(user, dict) else "",
+                    create_time=str(create_time) if create_time is not None else "",
+                    url=f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else "",
                     extra={
-                        "liked_count": note.get("liked_count", 0),
-                        "collected_count": note.get("collected_count", 0),
-                        "comment_count": note.get("comment_count", 0),
-                        "share_count": note.get("share_count", 0),
+                        "liked_count": interact.get("liked_count", note.get("liked_count", 0)),
+                        "collected_count": interact.get("collected_count", note.get("collected_count", 0)),
+                        "comment_count": interact.get("comment_count", note.get("comment_count", 0)),
+                        "share_count": interact.get("share_count", note.get("share_count", 0)),
                         "type": note.get("type", ""),
+                        "xsec_token": note.get("xsec_token", ""),
                     },
                 ))
             return items
@@ -338,12 +390,21 @@ class XhsAdapter(BasePlatformAdapter):
         items = self.get_content_lists(uid)
         events = []
         for item in items[:limit]:
+            timestamp = 0
+            if item.create_time:
+                try:
+                    timestamp = int(item.create_time)
+                    if timestamp < 1000000000000:
+                        timestamp *= 1000
+                except (TypeError, ValueError):
+                    timestamp = 0
             events.append(EventItem(
                 event_id=item.item_id,
                 event_type="发布笔记",
                 content=item.title,
-                timestamp=0,  # 需要从笔记详情获取
+                timestamp=timestamp,
                 media_title=item.title,
+                url=item.url,
                 extra=item.extra,
             ))
         return events
@@ -357,4 +418,3 @@ class XhsAdapter(BasePlatformAdapter):
     def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
         """获取粉丝列表 — 暂不支持"""
         return []
-

@@ -10,11 +10,16 @@ from os import path
 
 import requests
 requests.packages.urllib3.disable_warnings()
+import execjs
+
+# PyExecJS imports ``Popen`` into its private runtime module. Configure that
+# local reference for UTF-8 output on Windows without replacing
+# ``subprocess.Popen`` process-wide (which breaks Python 3.14 asyncio imports).
 import subprocess
 from functools import partial
+import execjs._external_runtime as _execjs_external_runtime
 
-subprocess.Popen = partial(subprocess.Popen, encoding="utf-8")
-import execjs
+_execjs_external_runtime.Popen = partial(subprocess.Popen, encoding="utf-8")
 
 if getattr(sys, 'frozen', None):
     basedir = sys._MEIPASS

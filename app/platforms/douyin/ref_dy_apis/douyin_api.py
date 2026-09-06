@@ -520,6 +520,20 @@ class DouyinAPI:
         user_list = []
         while True:
             res_json = DouyinAPI.search_user(auth, query, offset, count)
+            if not isinstance(res_json, dict) or "user_list" not in res_json:
+                # 登录态失效/风控等：带出接口给的真实原因，避免上游只能看到 KeyError('user_list')
+                msg = res_json.get("status_msg") if isinstance(res_json, dict) else None
+                raise RuntimeError(f"抖音搜索接口拒绝: {msg or res_json}")
+            if res_json.get("status_code") not in (0, None):
+                msg = res_json.get("status_msg") or f"status_code={res_json.get('status_code')}"
+                raise RuntimeError(f"抖音搜索失败: {msg}")
+            # 风控人机验证：返回"成功"但结果为空，search_nil_type=verify_check，
+            # 需要用户去浏览器完成滑块/扫码验证后才能恢复
+            nil_type = str((res_json.get("search_nil_info") or {}).get("search_nil_type") or "")
+            if nil_type == "verify_check" and not res_json.get("user_list"):
+                raise RuntimeError(
+                    "抖音触发人机验证（滑块/扫码）: 请在浏览器打开 douyin.com 随便搜一次并完成验证，完成后回到本页重新搜索"
+                )
             users = res_json["user_list"]
             user_list.extend(users)
             if res_json["has_more"] != 1 or len(user_list) >= num:
