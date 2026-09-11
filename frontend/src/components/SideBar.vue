@@ -1,7 +1,6 @@
 <script setup>
 import { computed } from 'vue'
 import Icon from './ui/Icon.vue'
-import CollectorPanel from './CollectorPanel.vue'
 import { state, setView, openSavedGraph, removeSavedGraph } from '../store'
 import { PLATFORMS } from '../platforms'
 
@@ -89,10 +88,6 @@ async function removeGraph(g) {
       </button>
       <div v-if="state.savedGraphsError" class="nav-graph-err">{{ state.savedGraphsError }}</div>
     </nav>
-
-    <div class="sidebar-foot">
-      <CollectorPanel />
-    </div>
   </aside>
 </template>
 
@@ -253,10 +248,5 @@ async function removeGraph(g) {
   line-height: 1.4;
   color: var(--danger, #d5372f);
   word-break: break-all;
-}
-
-.sidebar-foot {
-  border-top: 1px solid var(--border);
-  padding: 10px;
 }
 </style>

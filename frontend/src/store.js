@@ -9,11 +9,12 @@
 import { reactive, watch } from 'vue'
 import { api } from './api'
 import { PLATFORMS, PLATFORM_MAP } from './platforms'
-import { fmtClock } from './utils'
 
 const UIDS_KEY = 'sight_uids'
 const LEGACY_UIDS_KEY = 'monitor_uids' // 旧版前端遗留，做一次迁移
+const TERMINAL_KEY = 'sight_terminal_open'
 const AUTO_REFRESH_MS = 5 * 60 * 1000
+const QUEUE_POLL_MS = 3000
 
 function loadStoredUids() {
   let raw = {}
@@ -71,15 +72,18 @@ export const state = reactive({
     entries: [],
     fetchedAt: null,
   },
-  collector: { status: null, busy: false, logs: [] },
   detailModal: null, // { platform, id }
   editEntry: null, // { id, summary, detail }
   autoRefresh: false,
   qrOpen: false,
+  accountModal: { open: false, platform: '' }, // 账号池管理弹窗（顶栏入口，platform 可为空=默认第一个）
   savedGraphs: [], // 已保存的关系图谱元信息（侧边栏列表，不含节点数据）
   activeGraphId: null, // 当前在图谱视图里载入的持久化图谱 id
   pendingGraph: null, // 待 ViewGraph 消费的持久化图谱载荷（点击侧边栏后设置）
   savedGraphsError: '', // 图谱保存/打开/删除失败提示（侧边栏展示）
+  terminalOpen: localStorage.getItem(TERMINAL_KEY) === '1', // 右侧终端面板
+  terminalTab: 'logs', // 终端面板当前页签: logs | queue
+  queues: [], // 各平台展开队列状态 /api/graph/expand/status（轮询）
 })
 
 for (const p of PLATFORMS) state.data[p.id] = blankPlatformData()
@@ -246,96 +250,6 @@ export function closeDetail() {
   state.detailModal = null
 }
 
-// ==================== 采集器 ====================
-
-function collectorLog(text, kind = 'info') {
-  state.collector.logs.unshift({ time: fmtClock(new Date()), text, kind })
-  if (state.collector.logs.length > 40) state.collector.logs.pop()
-}
-
-function activeTargets() {
-  const targets = {}
-  for (const p of PLATFORMS) {
-    if (state.uids[p.id]) targets[p.id] = state.uids[p.id]
-  }
-  return targets
-}
-
-export async function refreshCollectorStatus() {
-  try {
-    state.collector.status = await api.get('/collector/status')
-  } catch {
-    /* 状态获取失败保持原样 */
-  }
-}
-
-export async function startCollector(intervalMinutes) {
-  const targets = activeTargets()
-  if (!Object.keys(targets).length) {
-    collectorLog('启动失败：请先在平台页设置目标用户', 'warn')
-    return false
-  }
-  state.collector.busy = true
-  try {
-    await api.post('/collector/start', { targets, interval_minutes: intervalMinutes })
-    collectorLog(`采集器已启动（每 ${intervalMinutes} 分钟）`, 'ok')
-    await refreshCollectorStatus()
-    return true
-  } catch (e) {
-    collectorLog(`启动失败：${e.message}`, 'warn')
-    return false
-  } finally {
-    state.collector.busy = false
-  }
-}
-
-export async function stopCollector() {
-  state.collector.busy = true
-  try {
-    await api.post('/collector/stop')
-    collectorLog('采集器已停止', 'info')
-    await refreshCollectorStatus()
-  } catch (e) {
-    collectorLog(`停止失败：${e.message}`, 'warn')
-  } finally {
-    state.collector.busy = false
-  }
-}
-
-/**
- * 手动采集一次。
- * 采集器已运行 -> 直接触发 collect；未运行 -> 临时启动（后端会立即执行一轮采集），
- * 等待其完成后停止，并刷新当前视图数据。
- */
-export async function collectOnce(intervalMinutes) {
-  state.collector.busy = true
-  try {
-    const running = state.collector.status?.running
-    if (running) {
-      collectorLog('手动采集中…')
-      await api.post('/collector/collect')
-    } else {
-      const targets = activeTargets()
-      if (!Object.keys(targets).length) {
-        collectorLog('采集失败：请先在平台页设置目标用户', 'warn')
-        return
-      }
-      collectorLog('手动采集中…')
-      await api.post('/collector/start', { targets, interval_minutes: intervalMinutes })
-      await new Promise((r) => setTimeout(r, 3000))
-      api.post('/collector/stop').catch(() => {})
-    }
-    collectorLog('采集完成，正在刷新数据…', 'ok')
-    await refreshCollectorStatus()
-    await refreshCurrentView()
-  } catch (e) {
-    collectorLog(`采集失败：${e.message}`, 'warn')
-    refreshCollectorStatus()
-  } finally {
-    state.collector.busy = false
-  }
-}
-
 // ==================== 关系图谱持久化 ====================
 
 /** 刷新侧边栏的已保存图谱列表 */
@@ -381,8 +295,53 @@ export function openQrLogin() {
   state.qrOpen = true
 }
 
+export function openAccountModal(platformId = '') {
+  state.accountModal.platform = platformId
+  state.accountModal.open = true
+}
+
+export function closeAccountModal() {
+  state.accountModal.open = false
+}
+
 export function closeQrLogin() {
   state.qrOpen = false
+}
+
+// ==================== 终端面板与队列状态 ====================
+
+export function toggleTerminal(open) {
+  state.terminalOpen = typeof open === 'boolean' ? open : !state.terminalOpen
+  try {
+    localStorage.setItem(TERMINAL_KEY, state.terminalOpen ? '1' : '0')
+  } catch {
+    /* 隐私模式下允许失败 */
+  }
+}
+
+export function setTerminalTab(tab) {
+  state.terminalTab = tab === 'queue' ? 'queue' : 'logs'
+}
+
+export async function refreshQueues() {
+  try {
+    state.queues = (await api.get('/graph/expand/status'))?.queues || []
+  } catch {
+    /* 后端未就绪时静默，下次轮询重试 */
+  }
+}
+
+/** 队列汇总：总排队 / 总执行中 / 熔断平台数 */
+export function queueSummary(queues = state.queues) {
+  let pending = 0
+  let running = 0
+  let paused = 0
+  for (const q of queues) {
+    pending += q.pending || 0
+    running += q.running || 0
+    if (q.paused) paused += 1
+  }
+  return { pending, running, paused, busy: pending + running }
 }
 
 // ==================== 初始化 ====================
@@ -428,6 +387,9 @@ export async function initStore() {
 
   // 3. 其余平台后台串行加载（写快照供时间线使用）
   chainLoadOtherPlatforms()
-  refreshCollectorStatus()
   loadSavedGraphs()
+
+  // 4. 队列状态轮询（TopBar 角标 + 终端面板队列页签共用）
+  refreshQueues()
+  setInterval(refreshQueues, QUEUE_POLL_MS)
 }

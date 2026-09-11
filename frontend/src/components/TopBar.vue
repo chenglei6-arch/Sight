@@ -5,6 +5,9 @@ import {
   state,
   refreshCurrentView,
   currentPlatform,
+  openAccountModal,
+  toggleTerminal,
+  queueSummary,
 } from '../store'
 
 const platform = computed(() => currentPlatform())
@@ -12,6 +15,12 @@ const VIEW_TITLES = { timeline: '活动时间线', graph: '关系图谱' }
 const title = computed(() =>
   platform.value ? platform.value.name : VIEW_TITLES[state.view] || 'Sight'
 )
+
+// 终端按钮角标：排队/执行任务数；有熔断平台时红色
+const queueInfo = computed(() => {
+  const s = queueSummary()
+  return { busy: s.busy, paused: s.paused }
+})
 
 const updatedAt = computed(() => {
   if (state.view === 'timeline') {
@@ -46,6 +55,21 @@ const busy = computed(() => {
         </span>
       </label>
 
+      <button
+        class="btn terminal-btn"
+        :class="{ active: state.terminalOpen }"
+        title="终端面板：运行日志与任务队列"
+        @click="toggleTerminal()"
+      >
+        <Icon name="terminal" :size="13" />
+        终端
+        <span v-if="queueInfo.paused > 0" class="term-badge err">{{ queueInfo.paused }}</span>
+        <span v-else-if="queueInfo.busy > 0" class="term-badge">{{ queueInfo.busy }}</span>
+      </button>
+      <button class="btn" title="配置各平台 Cookie 与多账号池（多账号并行查询加速）" @click="openAccountModal(platform?.id || '')">
+        <Icon name="users" :size="13" />
+        账号
+      </button>
       <button class="btn" :disabled="busy" @click="refreshCurrentView()">
         <Icon name="refresh" :size="13" :class="{ spinning: busy }" />
         刷新
@@ -91,6 +115,34 @@ const busy = computed(() => {
 .topbar-updated {
   font-size: 12px;
   color: var(--text-3);
+}
+
+.terminal-btn {
+  position: relative;
+}
+
+.terminal-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.term-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 16px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.term-badge.err {
+  background: var(--danger);
 }
 
 .topbar-switch {

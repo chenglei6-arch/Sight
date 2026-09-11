@@ -53,6 +53,11 @@ POST /api/graph/save                         按名称保存当前图谱（同�
 GET  /api/graph/saved                        已保存图谱列表
 GET  /api/graph/saved/<id>                   图谱完整数据（免重新搜索直接渲染）
 DELETE /api/graph/saved/<id>                 删除已保存图谱
+
+# 运行日志（前端"终端"面板数据源）
+GET  /api/logs/recent?after=seq&limit=n      内存日志缓冲尾部（增量轮询）
+GET  /api/logs/stream?after=seq              SSE 实时日志流（stdout/stderr + 数据拉取记录）
+GET  /api/graph/expand/status                各平台展开队列状态（排队/执行/熔断/账号数）
 ```
 
 完整接口和平台限制见 [`docs/`](docs/)；小红书说明见 [`docs/XHS_QUICKSTART.md`](docs/XHS_QUICKSTART.md)。

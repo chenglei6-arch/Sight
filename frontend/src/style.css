@@ -512,34 +512,6 @@ a:hover {
     justify-content: center;
   }
 
-  .sidebar-foot {
-    grid-column: 2;
-    grid-row: 1;
-    min-width: 0;
-    padding: 8px 10px;
-    border-top: none;
-  }
-
-  .collector-head {
-    width: auto;
-  }
-
-  .collector-title {
-    display: none;
-  }
-
-  .collector-row {
-    margin-top: 4px;
-  }
-
-  .interval-label,
-  .interval-unit,
-  .collector-collect,
-  .collector-last,
-  .collector-logs {
-    display: none;
-  }
-
   .app-content {
     padding: 16px 16px 40px;
   }

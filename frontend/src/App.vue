@@ -8,7 +8,9 @@ import ViewGraph from './components/ViewGraph.vue'
 import DetailModal from './components/DetailModal.vue'
 import QrLoginModal from './components/QrLoginModal.vue'
 import EditEntryModal from './components/EditEntryModal.vue'
-import { state, initStore } from './store'
+import CookieModal from './components/CookieModal.vue'
+import TerminalPanel from './components/TerminalPanel.vue'
+import { state, initStore, closeAccountModal, refreshCurrentView } from './store'
 
 onMounted(initStore)
 </script>
@@ -26,8 +28,16 @@ onMounted(initStore)
       </main>
     </div>
 
+    <TerminalPanel />
+
     <DetailModal />
     <QrLoginModal v-model="state.qrOpen" />
     <EditEntryModal />
+    <CookieModal
+      :open="state.accountModal.open"
+      :platform="state.accountModal.platform"
+      @close="closeAccountModal"
+      @saved="refreshCurrentView()"
+    />
   </div>
 </template>
