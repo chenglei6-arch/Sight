@@ -49,6 +49,11 @@ from app.credentials import CredentialManager
 from app.config import REQUEST_TIMEOUT, MAX_RETRIES
 
 
+def _douyin_verified(u: dict) -> bool:
+    """抖音认证判定：user_verified 布尔或 custom_verify 有内容（个人/机构认证）"""
+    return bool(u.get("user_verified")) or bool(u.get("custom_verify"))
+
+
 class DouyinAdapter(BasePlatformAdapter):
     """抖音平台适配器 — 纯 API 实现，参考 DouYin_Spider 的 main.py 使用模式"""
 
@@ -57,8 +62,8 @@ class DouyinAdapter(BasePlatformAdapter):
 
     BASE_URL = "https://www.douyin.com"
 
-    def __init__(self, credentials: dict = None):
-        super().__init__(credentials)
+    def __init__(self, credentials: dict = None, account_id: str = None):
+        super().__init__(credentials, account_id)
         self._auth: DouyinAuth | None = None
         self._last_request_at = 0.0
         # /graph 接口会从多个线程并发调用本适配器，限流必须串行化
@@ -92,12 +97,14 @@ class DouyinAdapter(BasePlatformAdapter):
           2. 项目根目录 .env 中的 DY_COOKIES
           3. reference/DouYin_Spider-master/.env 中的 DY_COOKIES（参考项目）
         """
-        # 1. credentials/douyin_cookie.txt — 最高优先级，用户手动维护
-        cookies = CredentialManager.load_cookies("douyin")
+        # 1. credentials/douyin_cookie.txt — 最高优先级，用户手动维护（主账号）
+        #    附加账号（多账号池）直接加载自己绑定的 Cookie
+        cookies = self._load_cookies()
         if cookies:
             cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
             sid = cookies.get("sessionid", "")
-            print(f"[抖音] 从 credentials/douyin_cookie.txt 加载: {len(cookies)} 个字段"
+            src = "credentials/douyin_cookie.txt" if not self.account_id else f"accounts.json({self.account_id})"
+            print(f"[抖音] 从 {src} 加载: {len(cookies)} 个字段"
                   + (f", session={sid[:10]}..." if sid else ""))
             return cookie_str
 
@@ -162,7 +169,7 @@ class DouyinAdapter(BasePlatformAdapter):
     # ==================== 工具方法 ====================
 
     def _get_cookie_value(self, key: str) -> str:
-        cookies = CredentialManager.load_cookies("douyin")
+        cookies = self._load_cookies()
         return cookies.get(key, "")
 
     @staticmethod
@@ -226,7 +233,7 @@ class DouyinAdapter(BasePlatformAdapter):
 
     def check_alive(self) -> bool:
         """检查凭证是否有效 — 调用 get_my_uid 验证"""
-        cookies = CredentialManager.load_cookies("douyin")
+        cookies = self._load_cookies()
         if not cookies:
             return False
         try:
@@ -264,7 +271,7 @@ class DouyinAdapter(BasePlatformAdapter):
         except Exception as e:
             print(f"[抖音] get_login_user 失败: {e}")
             # 兜底：从 Cookie 获取基础信息
-            cookies = CredentialManager.load_cookies("douyin")
+            cookies = self._load_cookies()
             uid_tt = cookies.get("uid_tt", "")
             if uid_tt:
                 return {"uid": uid_tt, "sec_uid": "", "nickname": "", "avatarUrl": ""}
@@ -295,6 +302,9 @@ class DouyinAdapter(BasePlatformAdapter):
                     "signature": info.get("signature", ""),
                     "gender": info.get("gender", 0),
                     "sec_uid": info.get("sec_uid", ""),
+                    # 搜索/资料接口带粉丝数；关注/粉丝列表接口无该字段
+                    "fans": info.get("follower_count") or 0,
+                    "is_verified": _douyin_verified(info),
                 })
             print(f"[抖音] search_user '{keyword}': 找到 {len(results)} 个用户")
             return results
@@ -660,56 +670,125 @@ class DouyinAdapter(BasePlatformAdapter):
 
     # ==================== 关注/粉丝 ====================
 
-    def get_follows(self, uid: str, limit: int = 50) -> list[dict]:
+    def _social_page(
+        self, uid: str, kind: str, limit: int, skip: int
+    ) -> tuple[list[dict], bool, int]:
         """
-        获取关注列表 — 参考 DouYin_Spider: DouyinAPI.get_some_user_following_list
-
-        参考 douyin_api.py:
-            DouyinAPI.get_some_user_following_list(auth, user_id, sec_id, num)
-        """
-        try:
-            user_info = self._resolve_user_info(uid)
-            if not user_info:
-                return []
-            user_id = user_info["uid"]
-            sec_uid = user_info["sec_uid"]
-            self._rate_limit()
-            follows = DouyinAPI.get_some_user_following_list(self.auth, user_id, sec_uid, limit)
-            return [{
-                "uid": str(f.get("uid", "")),
-                "nickname": f.get("nickname", ""),
-                "avatarUrl": self._extract_avatar_url(f),
-                "signature": f.get("signature", ""),
-                "gender": f.get("gender", 0),
-                "sec_uid": f.get("sec_uid", ""),
-            } for f in follows]
-        except Exception as e:
-            print(f"[抖音] get_follows 失败: {e}")
-            return []
-
-    def get_followers(self, uid: str, limit: int = 50) -> list[dict]:
-        """
-        获取粉丝列表 — 参考 DouYin_Spider: DouyinAPI.get_some_user_follower_list
+        增量拉取一页关注/粉丝（抖音分页游标：max_time）。
+        kind: 'follows' | 'followers'
+        返回 (条目, 还有更多, 总数或 -1)；抖音不返回真实总数。
         """
         try:
             user_info = self._resolve_user_info(uid)
             if not user_info:
-                return []
+                raise RuntimeError(
+                    f"[抖音] 无法解析用户 {uid} 的资料（Cookie 可能失效/过期，或被风控）"
+                )
             user_id = user_info["uid"]
             sec_uid = user_info["sec_uid"]
-            self._rate_limit()
-            followers = DouyinAPI.get_some_user_follower_list(self.auth, user_id, sec_uid, limit)
-            return [{
-                "uid": str(f.get("uid", "")),
-                "nickname": f.get("nickname", ""),
-                "avatarUrl": self._extract_avatar_url(f),
-                "signature": f.get("signature", ""),
-                "gender": f.get("gender", 0),
-                "sec_uid": f.get("sec_uid", ""),
-            } for f in followers]
+            max_time = "0"
+            remaining_skip = max(0, skip)
+            items: list[dict] = []
+            has_more = False
+            PAGE = 20
+            while len(items) < limit:
+                self._rate_limit()
+                if kind == "follows":
+                    res = DouyinAPI.get_user_following_list(self.auth, user_id, sec_uid, max_time, PAGE)
+                    key = "followings"
+                else:
+                    res = DouyinAPI.get_user_follower_list(self.auth, user_id, sec_uid, max_time, PAGE)
+                    key = "followers"
+                # 抖音响应里 mix_count 是关注/粉丝的声明总数（即使列表被限制不返回，该字段仍存在）
+                # 抖音 API 用 status_code 表达业务错误（如 2096=列表不可见），
+                # 必须把真实原因带给上层/前端，不能当成"空列表"吞掉
+                status_code = res.get("status_code", 0)
+                status_msg = res.get("status_msg") or ""
+                if status_code == 2096:
+                    # 抖音网页端自改版后普遍不开放查看他人关注/粉丝列表，返回 2096；
+                    # 多数情况并非对方主动设置隐私，而是平台 web 端限制（App 内可查看）
+                    raise RuntimeError(
+                        "[抖音] 网页端无法获取该用户的关注/粉丝列表（抖音 Web 端已限制查看他人列表，"
+                        "App 内可能可见；或对方设置了列表隐私）"
+                    )
+                if status_code:
+                    raise RuntimeError(f"[抖音] {status_msg or f'接口错误 {status_code}'}（{kind} 列表）")
+                batch = res.get(key) or []
+                has_more = res.get("has_more") == 1
+                # status=0 但接口承认有数据却不给列表（mix_count>0 而列表为空）：
+                # 说明同样被平台限制，不能误报成"对方没有关注任何人"
+                if not batch and skip == 0 and "mix_count" in res:
+                    try:
+                        declared = int(res.get("mix_count") or 0)
+                    except (TypeError, ValueError):
+                        declared = 0
+                    if declared > 0:
+                        raise RuntimeError(
+                            "[抖音] 网页端无法获取该用户的关注/粉丝列表（接口未返回数据，"
+                            "抖音 Web 端已限制查看他人列表，App 内可能可见）"
+                        )
+                if remaining_skip >= len(batch):
+                    remaining_skip -= len(batch)
+                else:
+                    for f in batch[remaining_skip:]:
+                        items.append({
+                            "uid": str(f.get("uid", "")),
+                            "nickname": f.get("nickname", ""),
+                            "avatarUrl": self._extract_avatar_url(f),
+                            "signature": f.get("signature", ""),
+                            "gender": f.get("gender", 0),
+                            "sec_uid": f.get("sec_uid", ""),
+                            # 列表条目可能不带 follower_count（缺省 0），认证标记是大V判定兜底信号
+                            "fans": f.get("follower_count") or 0,
+                            "is_verified": _douyin_verified(f),
+                        })
+                        if len(items) >= limit:
+                            break
+                    remaining_skip = 0
+                if not has_more or not batch:
+                    break
+                max_time = str(res.get("min_time", max_time))
+            more = len(items) >= limit and has_more  # 抖音无总数：取满且 has_more 才算还有更多
+            return items, more, -1
+        except RuntimeError:
+            # 业务错误（隐私不可见/风控等）已带明确消息，直接透传
+            raise
+        except json.JSONDecodeError as e:
+            # 接口返回了 HTML 而非 JSON：典型为风控/人机验证拦截，需与"列表为空"区分开
+            print(f"[抖音] {kind} 接口返回非 JSON（疑似风控/验证码拦截）")
+            raise RuntimeError(
+                f"[抖音] 拉取{kind}失败：接口返回非 JSON（疑似被风控/人机验证拦截，"
+                "请到 douyin.com 完成一次验证后重试，或更新 Cookie）"
+            ) from e
         except Exception as e:
-            print(f"[抖音] get_followers 失败: {e}")
-            return []
+            # 其它拉取失败要让上层知道（graph_social 会把真实原因展示给前端），不能静默吞掉伪装成"没有列表"
+            print(f"[抖音] {kind} 拉取失败: {e}")
+            raise RuntimeError(f"[抖音] 拉取{kind}失败: {e}") from e
+
+    def get_follows(self, uid: str, limit: int = 50, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取关注列表（增量：skip 已拉条数；返回 条目/还有更多/总数(-1)）"""
+        return self._social_page(uid, "follows", limit, skip)
+
+    def get_followers(self, uid: str, limit: int = 50, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取粉丝列表（增量：skip 已拉条数；返回 条目/还有更多/总数(-1)）"""
+        return self._social_page(uid, "followers", limit, skip)
+
+    def refresh_user_info(self, uid: str) -> Optional[dict]:
+        """重新拉取用户最新粉丝数/认证（图谱"重新标记"用）；绕过缓存保证拿到新数据"""
+        try:
+            user_url = f"{self.BASE_URL}/user/{uid}"
+            self._rate_limit()
+            user = DouyinAPI.get_user_info(self.auth, user_url).get("user", {})
+            if not user.get("uid"):
+                return None
+            return {
+                "nickname": user.get("nickname", ""),
+                "fans": user.get("follower_count") or 0,
+                "is_verified": _douyin_verified(user),
+            }
+        except Exception as e:
+            print(f"[抖音] refresh_user_info({uid}) 失败: {e}")
+            return None
 
     # ==================== 推荐 Feed ====================
 
