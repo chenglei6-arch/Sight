@@ -81,8 +81,16 @@ class BasePlatformAdapter(ABC):
     platform_id: str = "__base__"    # 子类必须覆盖
     platform_name: str = "Base"      # 平台中文名
 
-    def __init__(self, credentials: dict = None):
+    def __init__(self, credentials: dict = None, account_id: str = None):
         self.credentials = credentials or {}
+        # 多账号池绑定的账号 ID；None = 主账号（credentials/<platform>_cookie.txt），
+        # 其他值 = accounts.json 中的附加账号。子类加载 Cookie 时应使用 _load_cookies()。
+        self.account_id = account_id
+
+    def _load_cookies(self) -> dict:
+        """加载本实例绑定账号的 Cookie（子类的 Cookie 读取统一走这里）"""
+        from app.credentials import CredentialManager
+        return CredentialManager.load_cookies(self.platform_id, getattr(self, "account_id", None))
 
     # ==================== 必须实现 ====================
 
@@ -123,13 +131,29 @@ class BasePlatformAdapter(ABC):
 
     # ==================== 社交（可选实现） ====================
 
-    def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
-        """获取关注列表"""
-        return []
+    def get_follows(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
+        """
+        获取关注列表。
+        统一返回 (条目列表, 是否还有更多, 真实总数或 -1)；
+        skip>0 表示跳过前面 skip 条（已拉取的人），用于增量续拉。
+        """
+        return [], False, -1
 
-    def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
-        """获取粉丝列表"""
-        return []
+    def get_followers(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
+        """
+        获取粉丝列表。
+        统一返回 (条目列表, 是否还有更多, 真实总数或 -1)；
+        skip>0 表示跳过前面 skip 条（已拉取的人），用于增量续拉。
+        """
+        return [], False, -1
+
+    def refresh_user_info(self, uid: str) -> Optional[dict]:
+        """
+        重新拉取单个用户的最新信息（图谱"重新标记"用）。
+        返回 {"nickname": str, "fans": int, "is_verified": bool 缺省则不更新}，
+        平台不支持时返回 None。
+        """
+        return None
 
     # ==================== 状态检查 ====================
 

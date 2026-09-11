@@ -68,8 +68,8 @@ class QQMusicAdapter(BasePlatformAdapter):
         "needNewCode": 0,
     }
 
-    def __init__(self, credentials: dict = None):
-        super().__init__(credentials)
+    def __init__(self, credentials: dict = None, account_id: str = None):
+        super().__init__(credentials, account_id)
         self._session: requests.Session | None = None
         self._last_request_at = 0.0
         self._g_tk = 5381  # 未登录默认值
@@ -93,7 +93,7 @@ class QQMusicAdapter(BasePlatformAdapter):
         s = requests.Session()
         if self._proxies:
             s.proxies.update(self._proxies)
-        cookies = CredentialManager.load_cookies("qqmusic")
+        cookies = self._load_cookies()
         if cookies:
             for key, value in cookies.items():
                 s.cookies.set(key, value)
@@ -366,7 +366,7 @@ class QQMusicAdapter(BasePlatformAdapter):
     def check_alive(self) -> bool:
         """检查 Cookie/连接是否有效"""
         try:
-            cookies = CredentialManager.load_cookies("qqmusic")
+            cookies = self._load_cookies()
         except FileNotFoundError:
             return False
         if not cookies:
@@ -378,7 +378,7 @@ class QQMusicAdapter(BasePlatformAdapter):
 
     def get_login_user(self) -> Optional[dict]:
         """获取当前登录用户信息"""
-        cookies = CredentialManager.load_cookies("qqmusic")
+        cookies = self._load_cookies()
         uin = ""
         for key in ("uin", "qqmusic_uin", "loginUin"):
             val = cookies.get(key, "")
@@ -456,6 +456,8 @@ class QQMusicAdapter(BasePlatformAdapter):
                     "signature": sign,
                     "gender": entry.get("gender", 0),
                     "type": field,
+                    # 歌手/艺人账号属公众账号，直接按认证处理；其余无认证信号
+                    "is_verified": field == "singer",
                     "extra": {"uin": raw_uin, "encrypt_uin": encrypt_uin},
                 })
                 # 缓存用户信息，供 get_profile 和 get_follows/get_followers 查询
@@ -1017,6 +1019,8 @@ class QQMusicAdapter(BasePlatformAdapter):
             "avatarUrl": logo if logo.startswith("http") else "",
             "avatar": logo,
             "signature": item.get("desc", "")[:200] if item.get("desc") else "",
+            # 列表条目若带粉丝数则透传（缺省 0），供前端大V判定
+            "fans": item.get("fans_num") or item.get("fans") or 0,
             "is_follow": item.get("is_follow", 0),
             "follow_time": item.get("follow_time", 0),
             "listen_num": item.get("listen_num", 0),
@@ -1088,7 +1092,14 @@ class QQMusicAdapter(BasePlatformAdapter):
             pass
         return None
 
-    def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
+    def refresh_user_info(self, uid: str) -> Optional[dict]:
+        """重新拉取用户最新粉丝数（图谱"重新标记"用）；fcg 接口对 encrypt_uin 也可用，无认证标记"""
+        stats = self._try_get_follow_count_via_fcg(str(uid).strip())
+        if stats is None:
+            return None
+        return {"fans": stats.get("fans") or 0}
+
+    def get_follows(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
         """
         获取用户的关注列表 (他关注了谁)。
 
@@ -1096,10 +1107,11 @@ class QQMusicAdapter(BasePlatformAdapter):
         对于 encrypt_uin 用户，API 无法返回关注列表（需要真实 QQ 号），
         仅可通过 fcg_get_profile_homepage API 获取关注总数(已存入 profile.extra.follow_count)。
         此处返回空列表，避免破坏快照持久化流程。
+        返回 (条目, 还有更多, 总数)
         """
         uid = str(uid).strip()
         if not uid:
-            return []
+            return [], False, -1
 
         # 解析真实 QQ 号
         real_uin = self._resolve_real_uin(uid)
@@ -1115,12 +1127,13 @@ class QQMusicAdapter(BasePlatformAdapter):
                     ssr_count = self._try_get_ssr_count(uid, "FollowNum")
                     if ssr_count is not None and ssr_count > 0:
                         print(f"[QQ音乐] SSR 关注数: {ssr_count}")
-                return []
+                return [], False, -1
 
-        # 分页获取所有关注
+        # 分页获取所有关注（start 从 skip 开始，支持增量续拉）
         all_items = []
         page_size = min(limit, 40)
-        start = 0
+        start = skip
+        total = 0
 
         while len(all_items) < limit:
             data = self._fetch_follow_list(real_uin, start, page_size, is_listen=0)
@@ -1143,9 +1156,10 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         if all_items:
             print(f"[QQ音乐] 关注列表: {len(all_items)} 人")
-        return all_items
+        more = skip + len(all_items) < total
+        return all_items, more, total
 
-    def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
+    def get_followers(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
         """
         获取用户的粉丝列表 (谁关注了他)。
 
@@ -1153,13 +1167,13 @@ class QQMusicAdapter(BasePlatformAdapter):
         对于 encrypt_uin 用户，API 无法返回粉丝列表（需要真实 QQ 号），
         仅可通过 fcg API 获取粉丝总数(已存入 profile.extra.fan_count)。
         此处返回空列表，避免破坏快照持久化流程。
-
         注意: QQ 音乐的粉丝 API (is_listen=1) 服务端不稳定，大 V 用户会超时，
         此时返回空列表，但粉丝数可从 fcg API 获取。
+        返回 (条目, 还有更多, 总数)
         """
         uid = str(uid).strip()
         if not uid:
-            return []
+            return [], False, -1
 
         # 解析真实 QQ 号
         real_uin = self._resolve_real_uin(uid)
@@ -1168,12 +1182,13 @@ class QQMusicAdapter(BasePlatformAdapter):
                 real_uin = uid
             else:
                 # encrypt_uin: 无法获取详细列表，返回空（粉丝数已存于 profile）
-                return []
+                return [], False, -1
 
-        # 分页获取所有粉丝
+        # 分页获取所有粉丝（start 从 skip 开始，支持增量续拉）
         all_items = []
         page_size = min(limit, 40)
-        start = 0
+        start = skip
+        total = 0
 
         while len(all_items) < limit:
             data = self._fetch_follow_list(real_uin, start, page_size, is_listen=1)
@@ -1196,4 +1211,5 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         if all_items:
             print(f"[QQ音乐] 粉丝列表: {len(all_items)} 人")
-        return all_items
+        more = skip + len(all_items) < total
+        return all_items, more, total

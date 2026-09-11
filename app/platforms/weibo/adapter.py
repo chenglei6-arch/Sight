@@ -47,10 +47,11 @@ class WeiboAdapter(BasePlatformAdapter):
     WEB_BASE = "https://weibo.com"
     SEARCH_BASE = "https://s.weibo.com"
 
-    def __init__(self, credentials: dict = None):
-        super().__init__(credentials)
+    def __init__(self, credentials: dict = None, account_id: str = None):
+        super().__init__(credentials, account_id)
         self._session: requests.Session | None = None
         self._last_request_at = 0.0
+        self.last_api_error: str | None = None  # 最近一次业务错误，供上层透传真实原因
 
     @property
     def session(self) -> requests.Session:
@@ -61,7 +62,7 @@ class WeiboAdapter(BasePlatformAdapter):
     def _build_session(self) -> requests.Session:
         """构建请求会话（带 Cookie 和 UA）"""
         s = requests.Session()
-        cookies = CredentialManager.load_cookies("weibo")
+        cookies = self._load_cookies()
         for key, value in cookies.items():
             s.cookies.set(key, value)
         s.headers.update({
@@ -101,11 +102,17 @@ class WeiboAdapter(BasePlatformAdapter):
                 if resp.status_code == 200:
                     data = resp.json()
                     if data.get("ok") == 1:
+                        self.last_api_error = None
                         return data.get("data", {})
+                    # ok=-100 且带 passport 链接 = 被重定向到登录页，登录态失效
+                    if data.get("ok") == -100 or data.get("url"):
+                        self.last_api_error = "登录态已失效，请更新 Cookie"
+                        print(f"[微博] 登录态失效，API 重定向到 passport，params={params}")
+                        return {}
                     # ok=0 通常表示登录态失效或参数错误
                     msg = data.get("msg", "")
-                    if msg:
-                        print(f"[微博] API 返回异常: {msg}, params={params}")
+                    self.last_api_error = msg or f"接口返回异常 (ok={data.get('ok')})"
+                    print(f"[微博] API 返回异常: {self.last_api_error}, params={params}")
                     return {}
                 else:
                     print(f"[微博] HTTP {resp.status_code} (attempt {attempt+1}), params={params}")
@@ -119,7 +126,7 @@ class WeiboAdapter(BasePlatformAdapter):
 
         return {}
 
-    def _web_get(self, url: str, params: dict = None) -> Optional[str]:
+    def _web_get(self, url: str, params: dict = None, headers: dict = None) -> Optional[str]:
         """获取网页内容（SSR 兜底）"""
         for attempt in range(MAX_RETRIES):
             try:
@@ -127,6 +134,7 @@ class WeiboAdapter(BasePlatformAdapter):
                 resp = self.session.get(
                     url,
                     params=params,
+                    headers=headers,
                     timeout=REQUEST_TIMEOUT,
                 )
                 if resp.status_code == 200:
@@ -144,7 +152,7 @@ class WeiboAdapter(BasePlatformAdapter):
 
     def check_alive(self) -> bool:
         """检查 Cookie 是否有效（通过访问移动端首页）"""
-        cookies = CredentialManager.load_cookies("weibo")
+        cookies = self._load_cookies()
         if not cookies:
             return False
         try:
@@ -157,7 +165,7 @@ class WeiboAdapter(BasePlatformAdapter):
 
     def get_login_user(self) -> Optional[dict]:
         """获取当前登录用户"""
-        cookies = CredentialManager.load_cookies("weibo")
+        cookies = self._load_cookies()
         # 从 Cookie 中提取 uid
         # 微博 Cookie 中的 SUB 字段包含用户信息
         uid = ""
@@ -187,88 +195,78 @@ class WeiboAdapter(BasePlatformAdapter):
     # ==================== 用户搜索 ====================
 
     def search_user(self, keyword: str, limit: int = 20) -> list[dict]:
-        """搜索用户（多策略）"""
-        # 策略 1: 纯数字，可能是 UID，直接查资料
-        if keyword.isdigit():
-            profile = self._get_profile_via_mobile(keyword)
-            if profile:
-                return [{
-                    "uid": profile.uid,
-                    "nickname": profile.nickname,
-                    "avatarUrl": profile.avatar_url,
-                    "signature": profile.signature,
-                    "gender": profile.gender,
-                    "is_vip": profile.is_vip,
-                    "fans": profile.extra.get("fans_count", 0),
-                    "follows": profile.extra.get("follow_count", 0),
-                    "weibo_num": profile.extra.get("weibo_count", 0),
-                }]
+        """按昵称搜索用户（s.weibo.com 用户搜索页，需有效登录 Cookie）
 
-        # 策略 2: 通过 s.weibo.com 网页搜索
-        users = self._search_via_web(keyword, limit)
-        if users:
-            return users
+        错误直接抛 RuntimeError，由 API 层透传给前端展示真实原因。
+        """
+        keyword = (keyword or "").strip()
+        if not keyword:
+            return []
+        return self._search_via_web(keyword, limit)
 
-        return []
+    # 用户卡片块（s.weibo.com SSR 页面）：<div class="card card-user-b ...">
+    _USER_CARD_SPLIT = '<div class="card card-user-b'
+    _USER_LINK_RE = re.compile(
+        r'href="//weibo\.com/u/(\d+)"[^>]*?class="name"[^>]*?>(.*?)</a>', re.S
+    )
+    _USER_AVATAR_RE = re.compile(r'<img\s+src="(https://\w+\.sinaimg\.cn/[^"]+)"')
+    _USER_FANS_RE = re.compile(r'粉丝[：:]\s*([\d.]+)(万)?')
+    _ISLOGIN_RE = re.compile(r"\$CONFIG\['islogin'\]\s*=\s*'(\d)'")
 
     def _search_via_web(self, keyword: str, limit: int = 20) -> list[dict]:
         """通过 s.weibo.com 网页搜索用户"""
         html = self._web_get(
             f"{self.SEARCH_BASE}/user",
-            params={"q": keyword, "page": 1},
+            params={"q": keyword, "page": 1, "Refer": "weibo_user"},
+            # s.weibo.com 对 XHR 请求会返回"404错误"页，必须去掉会话里全局的
+            # X-Requested-With 头
+            headers={"X-Requested-With": None},
         )
         if not html:
-            return []
+            raise RuntimeError("微博搜索失败：搜索页请求无响应，请稍后重试")
+
+        # 被 302 到 passport 访客页 / islogin=0 = 登录态失效
+        if "passport.weibo.com" in html or (
+            (m := self._ISLOGIN_RE.search(html)) and m.group(1) != "1"
+        ):
+            raise RuntimeError("微博搜索失败：登录态已失效，请更新 Cookie")
+
+        # 过期/无效 Cookie 下 s.weibo.com 返回整页"404错误"
+        title = re.search(r"<title>(.*?)</title>", html, re.S)
+        if title and "404" in title.group(1):
+            raise RuntimeError(
+                "微博搜索失败：搜索页返回 404，Cookie 可能已失效，请更新 Cookie 后重试"
+            )
 
         users = []
-        # 解析搜索结果中的用户卡片
-        # s.weibo.com 的用户名部分使用 nickname 模式
-        card_pattern = re.compile(
-            r'<div\s+class="card(?:-\w+)*"\s+action-type="cardClick".*?</div>',
-            re.DOTALL,
-        )
-        # 更通用的解析：提取所有用户 card
-        try:
-            # 提取包含用户信息的 JSON 数据（微博页面通常在 script 中嵌入数据）
-            json_match = re.search(
-                r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
-                html,
-            )
-            if json_match:
-                state = json.loads(json_match.group(1))
-                user_list = (
-                    state.get("users", {})
-                )
-                for uid, info in user_list.items():
-                    if len(users) >= limit:
-                        break
-                    if isinstance(info, dict):
-                        users.append({
-                            "uid": str(info.get("id", uid)),
-                            "nickname": info.get("screen_name", ""),
-                            "avatarUrl": info.get("profile_image_url", ""),
-                            "signature": info.get("description", ""),
-                            "gender": {"m": 1, "f": 2}.get(info.get("gender", ""), 0),
-                            "is_vip": info.get("verified", False),
-                            "fans": info.get("followers_count", 0),
-                            "follows": info.get("friends_count", 0),
-                            "weibo_num": info.get("statuses_count", 0),
-                        })
+        for block in html.split(self._USER_CARD_SPLIT)[1:]:
+            link = self._USER_LINK_RE.search(block)
+            if not link:
+                continue
+            uid, nickname = link.group(1), re.sub(r"<[^>]+>", "", link.group(2)).strip()
+            if not uid or not nickname:
+                continue
 
-            if users:
-                return users
+            fans = 0
+            fans_m = self._USER_FANS_RE.search(block)
+            if fans_m:
+                fans = float(fans_m.group(1))
+                if fans_m.group(2):
+                    fans *= 10000
+                fans = int(fans)
 
-            # 兜底：直接从 HTML 提取
-            # 匹配用户列表项
-            items = re.findall(
-                r'<div\s+class="card(?:-\w+)*"\s+.*?nick-name">(.*?)</a>',
-                html,
-            )
+            avatar_m = self._USER_AVATAR_RE.search(block)
+            users.append({
+                "uid": uid,
+                "nickname": nickname,
+                "avatarUrl": avatar_m.group(1) if avatar_m else "",
+                "signature": "",
+                "fans": fans,
+            })
+            if len(users) >= limit:
+                break
 
-        except (json.JSONDecodeError, AttributeError) as e:
-            print(f"[微博] 解析搜索结果失败: {e}")
-
-        return users[:limit]
+        return users
 
     # ==================== 用户资料 ====================
 
@@ -601,94 +599,129 @@ class WeiboAdapter(BasePlatformAdapter):
 
     # ==================== 关注/粉丝 ====================
 
-    def get_follows(self, uid: str, limit: int = 200) -> list[dict]:
-        """获取关注列表（需要登录态）"""
-        uid = str(uid).strip()
-        if not uid:
-            return []
+    def _pc_ajax_get(self, path: str, params: dict) -> dict:
+        """
+        weibo.com PC 端 ajax 接口（需有效登录 Cookie）。
+        实现参考 nghuyong/WeiboSpider：m.weibo.cn 的 containerid 方案对 weibo.com
+        Cookie 做 wapsso 跨域校验会被拦（ok=-100 跳 passport），PC ajax 无此问题。
+        """
+        headers = {"Referer": "https://weibo.com/", "X-Requested-With": "XMLHttpRequest"}
+        for attempt in range(MAX_RETRIES):
+            try:
+                self._rate_limit()
+                resp = self.session.get(
+                    f"https://weibo.com{path}",
+                    params=params,
+                    headers=headers,
+                    timeout=REQUEST_TIMEOUT,
+                )
+                if resp.status_code == 200:
+                    try:
+                        data = resp.json()
+                    except ValueError:
+                        # 非 JSON（多为 302 跟到 passport 登录页的 HTML）
+                        self.last_api_error = "登录态已失效，请更新 Cookie"
+                        print(f"[微博] PC 接口返回非 JSON（疑似登录页），path={path}")
+                        return {}
+                    if isinstance(data, dict) and data.get("ok") == 1:
+                        self.last_api_error = None
+                        return data
+                    msg = (data or {}).get("message") or ""
+                    self.last_api_error = msg or f"接口返回异常 (ok={(data or {}).get('ok')})"
+                    print(f"[微博] PC 接口返回异常: {self.last_api_error}, path={path}")
+                    return {}
+                print(f"[微博] HTTP {resp.status_code} (attempt {attempt+1}), path={path}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(1.5 + attempt * 0.5)
+            except (requests.RequestException, ValueError) as e:
+                print(f"[微博] 请求失败 (attempt {attempt+1}): {e}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(1.5 + attempt)
+        return {}
 
-        follow_list = []
-        page = 1
-
-        while len(follow_list) < limit:
-            data = self._mobile_get({
-                "containerid": f"231051_-_followlist_{uid}",
-                "page": page,
-            })
+    def _social_page(
+        self, uid: str, relate: str, limit: int, skip: int
+    ) -> tuple[list[dict], bool, int]:
+        """
+        增量拉取一页关注/粉丝。relate: "" 关注列表 | "fans" 粉丝列表（WeiboSpider 同款参数）。
+        单页 20 条。返回 (条目, 还有更多, 真实总数或 -1)。
+        """
+        per_page = 20
+        first_page = skip // per_page + 1
+        items: list[dict] = []
+        total = -1
+        page = first_page
+        skip_in_page = skip % per_page
+        while len(items) < limit:
+            params = {"page": page, "uid": uid}
+            if relate:
+                params["relate"] = relate
+                params["type"] = relate
+            data = self._pc_ajax_get("/ajax/friendships/friends", params)
             if not data:
+                # 第一页就取不到任何响应 = 接口失败（登录态失效/被风控/参数错误）；
+                # 真正的空列表会返回 ok=1 且 users=[]。不吞错，让上层把真实原因展示给用户。
+                if page == first_page:
+                    detail = f"，平台返回：{self.last_api_error}" if self.last_api_error else ""
+                    raise RuntimeError(
+                        f"[微博] 获取关注/粉丝列表失败：接口无响应（Cookie 可能失效，或触发风控）{detail}"
+                    )
                 break
-
-            cards = data.get("cards", [])
-            if not cards:
+            if total < 0:
+                try:
+                    total = int(data.get("total_number", -1))
+                except (TypeError, ValueError):
+                    total = -1
+            users = data.get("users") or []
+            if not users:
                 break
-
-            found = False
-            for card in cards:
-                card_group = card.get("card_group", [])
-                for item in card_group:
-                    if item.get("card_type") != 10:
-                        continue
-                    user = item.get("user", {})
-                    if not user:
-                        continue
-                    follow_list.append({
-                        "uid": str(user.get("id", "")),
-                        "nickname": user.get("screen_name", ""),
-                        "avatarUrl": user.get("profile_image_url", ""),
-                        "signature": user.get("description", ""),
-                        "gender": {"m": 1, "f": 2}.get(user.get("gender", ""), 0),
-                        "is_vip": user.get("verified", False),
-                    })
-                    found = True
-
-            if not found:
+            for user in users:
+                if skip_in_page:
+                    skip_in_page -= 1  # 首页跳掉已拉取的条目
+                    continue
+                items.append({
+                    "uid": str(user.get("id", "")),
+                    "nickname": user.get("screen_name", ""),
+                    "avatarUrl": user.get("profile_image_url", "") or user.get("avatar_hd", ""),
+                    "signature": user.get("description", ""),
+                    "gender": {"m": 1, "f": 2}.get(user.get("gender", ""), 0),
+                    "is_vip": bool(user.get("verified", False)),
+                    "is_verified": bool(user.get("verified", False)),
+                    "fans": user.get("followers_count", 0) or 0,
+                })
+                if len(items) >= limit:
+                    break
+            if len(items) >= limit or len(users) < per_page:
                 break
             page += 1
+        if total >= 0:
+            more = skip + len(items) < total
+        else:
+            more = len(items) >= limit  # 无总数时按取满推断还有更多
+        return items, more, total
 
-        return follow_list[:limit]
-
-    def get_followers(self, uid: str, limit: int = 200) -> list[dict]:
-        """获取粉丝列表（需要登录态）"""
+    def get_follows(self, uid: str, limit: int = 200, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取关注列表（增量：skip 已拉条数；返回 条目/还有更多/总数或-1）"""
         uid = str(uid).strip()
         if not uid:
-            return []
+            return [], False, -1
+        return self._social_page(uid, "", limit, skip)
 
-        follower_list = []
-        page = 1
+    def get_followers(self, uid: str, limit: int = 200, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取粉丝列表（增量：skip 已拉条数；返回 条目/还有更多/总数或-1）"""
+        uid = str(uid).strip()
+        if not uid:
+            return [], False, -1
+        return self._social_page(uid, "fans", limit, skip)
 
-        while len(follower_list) < limit:
-            data = self._mobile_get({
-                "containerid": f"231051_-_fanslist_{uid}",
-                "page": page,
-            })
-            if not data:
-                break
-
-            cards = data.get("cards", [])
-            if not cards:
-                break
-
-            found = False
-            for card in cards:
-                card_group = card.get("card_group", [])
-                for item in card_group:
-                    if item.get("card_type") != 10:
-                        continue
-                    user = item.get("user", {})
-                    if not user:
-                        continue
-                    follower_list.append({
-                        "uid": str(user.get("id", "")),
-                        "nickname": user.get("screen_name", ""),
-                        "avatarUrl": user.get("profile_image_url", ""),
-                        "signature": user.get("description", ""),
-                        "gender": {"m": 1, "f": 2}.get(user.get("gender", ""), 0),
-                        "is_vip": user.get("verified", False),
-                    })
-                    found = True
-
-            if not found:
-                break
-            page += 1
-
-        return follower_list[:limit]
+    def refresh_user_info(self, uid: str) -> Optional[dict]:
+        """重新拉取用户最新粉丝数/认证（图谱"重新标记"用）"""
+        profile = self.get_profile(uid)
+        if not profile:
+            return None
+        # 微博 get_profile 把 verified 存在 is_vip 上（vip_label=认证原因）
+        return {
+            "nickname": profile.nickname,
+            "fans": profile.extra.get("fans_count") or 0,
+            "is_verified": bool(profile.is_vip),
+        }

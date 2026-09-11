@@ -18,15 +18,22 @@ from app.platforms.netease.crypto import encrypt_request
 from app.platforms.netease.client import NeteaseClient
 
 
+def _netease_verified(u: dict) -> bool:
+    """网易云认证判定：authStatus 非零，或 userType 为音乐人(4)/歌手·官方(200+)"""
+    if u.get("authStatus"):
+        return True
+    return (u.get("userType") or 0) >= 4
+
+
 class NeteaseAdapter(BasePlatformAdapter):
     """网易云音乐平台适配器"""
 
     platform_id = "netease"
     platform_name = "网易云音乐"
 
-    def __init__(self, credentials: dict = None):
-        super().__init__(credentials)
-        self._client = NeteaseClient(credentials)
+    def __init__(self, credentials: dict = None, account_id: str = None):
+        super().__init__(credentials, account_id)
+        self._client = NeteaseClient(credentials, account_id)
 
     # ==================== 状态检查 ====================
 
@@ -66,6 +73,9 @@ class NeteaseAdapter(BasePlatformAdapter):
                 "signature": u.get("signature", ""),
                 "gender": u.get("gender", 0),
                 "vipType": u.get("vipType", 0),
+                # 搜索接口直接带粉丝数；列表/关注接口没有该字段
+                "fans": u.get("followeds") or 0,
+                "is_verified": _netease_verified(u),
             }
             for u in users
         ]
@@ -273,51 +283,68 @@ class NeteaseAdapter(BasePlatformAdapter):
 
     # ==================== 关注/粉丝 ====================
 
-    def get_follows(self, uid: str, limit: int = 500) -> list[dict]:
-        """获取关注列表（翻页直到取够 limit 或没有更多）"""
-        all_follows = []
-        offset = 0
-        while len(all_follows) < limit:
-            resp = self._client.weapi_post(f"/weapi/user/getfollows/{uid}", {
-                "uid": uid, "limit": 100, "offset": offset, "order": True,
-            })
-            follows = resp.get("follow", [])
-            if not follows:
+    def _social_page(
+        self, endpoint: str, payload: dict, key: str, limit: int, skip: int
+    ) -> tuple[list[dict], bool, int]:
+        """增量拉取一页关注/粉丝。返回 (条目, 还有更多, 总数或-1)；网易不返回总数"""
+        items: list[dict] = []
+        offset = skip
+        need = limit
+        while len(items) < need:
+            p = dict(payload)
+            p["offset"] = offset
+            resp = self._client.weapi_post(endpoint, p)
+            code = resp.get("code")
+            if code == 301 or code == -462:
+                # 不需登录的接口（如 getfollows）正常，粉丝列表等需登录接口会这样失败
+                raise RuntimeError("[网易云] 登录态已失效，请更新 Cookie 后重试")
+            if code != 200:
+                raise RuntimeError(
+                    f"[网易云] 获取失败：{resp.get('message') or resp.get('msg') or '未知错误'}(code={code})"
+                )
+            batch = resp.get(key) or []
+            if not batch:
                 break
-            for f in follows:
-                all_follows.append({
+            for f in batch:
+                items.append({
                     "uid": str(f.get("userId", "")),
                     "nickname": f.get("nickname", ""),
                     "avatarUrl": f.get("avatarUrl", ""),
                     "signature": f.get("signature", ""),
                     "gender": f.get("gender", 0),
+                    # 列表接口不带粉丝数，认证标记是大V判定唯一可用信号
+                    "is_verified": _netease_verified(f),
                 })
+                if len(items) >= need:
+                    break
             if not resp.get("more"):
                 break
             offset += 100
-        return all_follows[:limit]
+        # 网易不返回总数：只有最后一页明确 more=false 才算拉完；取满时视为还有更多
+        more = len(items) >= need and bool(resp.get("more", False))
+        return items, more, -1
 
-    def get_followers(self, uid: str, limit: int = 500) -> list[dict]:
-        """获取粉丝列表（翻页直到取够 limit 或没有更多）"""
-        all_followers = []
-        offset = 0
-        while len(all_followers) < limit:
-            resp = self._client.weapi_post(f"/weapi/user/getfolloweds/{uid}", {
-                "userId": uid, "limit": 100, "offset": offset,
-                "time": "0", "getcounts": True,
-            })
-            followers = resp.get("followeds", [])
-            if not followers:
-                break
-            for f in followers:
-                all_followers.append({
-                    "uid": str(f.get("userId", "")),
-                    "nickname": f.get("nickname", ""),
-                    "avatarUrl": f.get("avatarUrl", ""),
-                    "signature": f.get("signature", ""),
-                    "gender": f.get("gender", 0),
-                })
-            if not resp.get("more"):
-                break
-            offset += 100
-        return all_followers[:limit]
+    def get_follows(self, uid: str, limit: int = 500, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取关注列表（增量：skip 已拉条数；返回 条目/还有更多/总数(-1)）"""
+        return self._social_page(f"/weapi/user/getfollows/{uid}", {
+            "uid": uid, "limit": 100, "order": True,
+        }, "follow", limit, skip)
+
+    def get_followers(self, uid: str, limit: int = 500, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取粉丝列表（增量：skip 已拉条数；返回 条目/还有更多/总数(-1)）"""
+        return self._social_page(f"/weapi/user/getfolloweds/{uid}", {
+            "userId": uid, "limit": 100, "time": "0", "getcounts": True,
+        }, "followeds", limit, skip)
+
+    def refresh_user_info(self, uid: str) -> Optional[dict]:
+        """重新拉取用户最新粉丝数/认证（图谱"重新标记"用）"""
+        detail = self._client.weapi_post(f"/weapi/v1/user/detail/{uid}", {})
+        if detail.get("code") != 200:
+            return None
+        p = detail.get("profile", {}) or {}
+        # 认证字段可能在 profile 内或 detail 顶层，合并后统一判定（profile 优先）
+        return {
+            "nickname": p.get("nickname", ""),
+            "fans": p.get("followeds") or 0,
+            "is_verified": _netease_verified({**detail, **p}),
+        }

@@ -37,11 +37,12 @@ class BilibiliAdapter(BasePlatformAdapter):
 
     BASE_API = "https://api.bilibili.com"
 
-    def __init__(self, credentials: dict = None):
-        super().__init__(credentials)
+    def __init__(self, credentials: dict = None, account_id: str = None):
+        super().__init__(credentials, account_id)
         self._session: requests.Session | None = None
         self._last_request_at = 0.0
         self._consecutive_rate_limits = 0
+        self.last_api_error: str | None = None  # 最近一次业务错误（code/msg），供上层透传真实原因
 
     @property
     def session(self) -> requests.Session:
@@ -51,7 +52,7 @@ class BilibiliAdapter(BasePlatformAdapter):
 
     def _build_session(self) -> requests.Session:
         s = requests.Session()
-        cookies = CredentialManager.load_cookies("bilibili")
+        cookies = self._load_cookies()
         if not cookies.get("SESSDATA"):
             print("[B站] 警告: 未检测到 SESSDATA，部分接口可能受限")
         for key, value in cookies.items():
@@ -131,6 +132,7 @@ class BilibiliAdapter(BasePlatformAdapter):
                 code = data.get("code")
                 if code == 0:
                     self._consecutive_rate_limits = 0
+                    self.last_api_error = None
                     return data.get("data", {})
 
                 if code == -799:
@@ -144,6 +146,7 @@ class BilibiliAdapter(BasePlatformAdapter):
                     return {}
 
                 print(f"[B站] API 返回异常: code={code}, msg={data.get('message', '')}, endpoint={endpoint}")
+                self.last_api_error = f"{data.get('message') or data.get('msg') or '未知错误'}(code={code})"
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1.5)
                 return data.get("data", {})
@@ -158,7 +161,7 @@ class BilibiliAdapter(BasePlatformAdapter):
     # ==================== 状态检查 ====================
 
     def check_alive(self) -> bool:
-        cookies = CredentialManager.load_cookies("bilibili")
+        cookies = self._load_cookies()
         if not cookies.get("SESSDATA"):
             return False
         try:
@@ -168,7 +171,7 @@ class BilibiliAdapter(BasePlatformAdapter):
             return False
 
     def get_login_user(self) -> Optional[dict]:
-        cookies = CredentialManager.load_cookies("bilibili")
+        cookies = self._load_cookies()
         uid = cookies.get("DedeUserID", "")
         # 尝试通过 nav 接口获取完整信息
         try:
@@ -201,7 +204,9 @@ class BilibiliAdapter(BasePlatformAdapter):
                 "avatarUrl": "https:" + u.get("upic", "") if u.get("upic") else "",
                 "signature": u.get("usign", ""),
                 "gender": {"男": 1, "女": 2}.get(u.get("gender", ""), 0),
-                "is_vip": u.get("vip", {}).get("status", 0) == 1,
+                "is_vip": u.get("vip", {}).get("status", 0) == 1,  # 大会员
+                # 官方机构认证（type=1）才视为“达人”；个人认证(type=0)不是
+                "is_verified": (u.get("official_verify") or {}).get("type", -1) == 1,
                 "fans": u.get("fans", 0),
                 "videos": u.get("videos", 0),
             }
@@ -396,52 +401,85 @@ class BilibiliAdapter(BasePlatformAdapter):
 
     # ==================== 关注/粉丝 ====================
 
-    def get_follows(self, uid: str, limit: int = 500) -> list[dict]:
-        """获取关注列表（翻页直到取够 limit 或没有更多，B站上限500）"""
-        all_follows = []
-        pn = 1
-        ps = 50  # B站单页最大 50
-        while len(all_follows) < limit:
-            result = self._get("/x/relation/followings", {
-                "vmid": uid, "ps": ps, "pn": pn,
-            })
-            follow_list = result.get("list") or []
-            if not follow_list:
-                break
-            for f in follow_list:
-                all_follows.append({
-                    "uid": str(f.get("mid", "")),
-                    "nickname": f.get("uname", ""),
-                    "avatarUrl": f.get("face", ""),
-                    "signature": f.get("sign", ""),
-                    "gender": {"男": 1, "女": 2}.get(f.get("gender", ""), 0),
-                })
-            if len(follow_list) < ps:
-                break
-            pn += 1
-        return all_follows[:limit]
-
-    def get_followers(self, uid: str, limit: int = 500) -> list[dict]:
-        """获取粉丝列表（翻页直到取够 limit 或没有更多，B站上限500）"""
-        all_followers = []
-        pn = 1
+    def _social_batch(
+        self, uid: str, endpoint: str, limit: int, skip: int
+    ) -> tuple[list[dict], bool, int]:
+        """
+        增量拉取一页关注/粉丝。
+        skip>0 表示跳过前面 skip 条（已展开的人），从后续开始取，避免重复。
+        返回 (条目, 是否还有更多, 真实总数或 -1)。单页 50。
+        B站 relation 接口最多只返回前 100 条（第 3 页起为空），因此实际可拉上限 100；
+        拉到 100 后再续拉也拿不到更多，more 固定为 False。
+        """
+        BILI_SOCIAL_HARD_CAP = 100
+        items: list[dict] = []
+        result: dict = {}
+        pn = max(1, skip // 50 + 1)
         ps = 50
-        while len(all_followers) < limit:
-            result = self._get("/x/relation/followers", {
-                "vmid": uid, "ps": ps, "pn": pn,
-            })
-            follower_list = result.get("list") or []
-            if not follower_list:
+        need = min(limit, BILI_SOCIAL_HARD_CAP - skip)  # 拿不满 100 也如实少拉
+        while len(items) < need:
+            result = self._get(endpoint, {"vmid": uid, "ps": ps, "pn": pn})
+            batch = result.get("list") or []
+            if not batch:
+                # 第一页就无响应且无 total = 接口失败（Cookie 失效/风控/参数错误）；
+                # 真正的空列表会带 total 字段。不吞错，让上层把真实原因展示给用户。
+                if pn == max(1, skip // 50 + 1) and "total" not in result:
+                    # 平台有明确业务错误（如 22115 用户已设置隐私）时如实透传，避免误导为 Cookie 失效
+                    detail = f"，平台返回：{self.last_api_error}" if self.last_api_error else ""
+                    raise RuntimeError(
+                        f"[B站] 获取关注/粉丝列表失败：接口无响应（Cookie 可能失效，或触发风控）{detail}"
+                    )
                 break
-            for f in follower_list:
-                all_followers.append({
+            start = (skip % 50) if pn == skip // 50 + 1 else 0  # 首页跳掉已拉取的条数
+            for f in batch[start:]:
+                items.append({
                     "uid": str(f.get("mid", "")),
                     "nickname": f.get("uname", ""),
                     "avatarUrl": f.get("face", ""),
                     "signature": f.get("sign", ""),
                     "gender": {"男": 1, "女": 2}.get(f.get("gender", ""), 0),
+                    # 官方机构认证(type=1)才视为“达人”；个人认证(type=0)不是
+                    "is_verified": _dict(f.get("official_verify")).get("type", -1) == 1,
+                    "fans": f.get("fans", 0) or 0,
                 })
-            if len(follower_list) < ps:
+                if len(items) >= need:
+                    break
+            if start and len(batch) <= start:
+                break
+            if len(batch) < ps:
                 break
             pn += 1
-        return all_followers[:limit]
+        total = -1
+        if isinstance(result, dict):
+            try:
+                total = int(result.get("total", -1))
+            except (TypeError, ValueError):
+                total = -1
+        # 还有更多：B站最多只能取 100 条；已到硬顶则无法再续拉
+        if skip + len(items) >= BILI_SOCIAL_HARD_CAP:
+            more = False
+        elif total >= 0:
+            more = skip + len(items) < total
+        else:
+            more = len(items) >= need and len(items) % 50 == 0
+        return items, more, total
+
+    def get_follows(self, uid: str, limit: int = 500, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取关注列表（增量：skip 已拉条数；返回 条目/还有更多/总数）"""
+        return self._social_batch(uid, "/x/relation/followings", limit, skip)
+
+    def get_followers(self, uid: str, limit: int = 500, skip: int = 0) -> tuple[list[dict], bool, int]:
+        """获取粉丝列表（增量：skip 已拉条数；返回 条目/还有更多/总数）"""
+        return self._social_batch(uid, "/x/relation/followers", limit, skip)
+
+    def refresh_user_info(self, uid: str) -> Optional[dict]:
+        """重新拉取用户最新粉丝数/认证（图谱"重新标记"用）"""
+        profile = self.get_profile(uid)
+        if not profile:
+            return None
+        return {
+            "nickname": profile.nickname,
+            "fans": profile.extra.get("follower_count") or 0,
+            # official 为认证机构/个人标题（空串=未认证）
+            "is_verified": bool(profile.extra.get("official")),
+        }

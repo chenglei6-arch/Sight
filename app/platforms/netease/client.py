@@ -22,11 +22,12 @@ from app.credentials import CredentialManager
 class NeteaseClient:
     """网易云音乐 HTTP 客户端"""
 
-    def __init__(self, credentials: dict = None):
+    def __init__(self, credentials: dict = None, account_id: str = None):
         self._session: requests.Session | None = None
         self._last_request_at = 0.0
         self._csrf = ""
         self._custom_credentials = credentials  # 允许注入自定义凭证
+        self.account_id = account_id  # 多账号池绑定的账号 ID（None = 主账号）
 
     # ==================== Session ====================
 
@@ -63,10 +64,11 @@ class NeteaseClient:
 
         return s
 
-    @staticmethod
-    def _load_cookies() -> dict:
-        """从凭证管理器加载 Cookie"""
-        return CredentialManager.load_cookies("netease")
+    def _load_cookies(self) -> dict:
+        """加载 Cookie：优先注入凭证，其次按账号 ID 从凭证管理器加载"""
+        if self._custom_credentials:
+            return self._custom_credentials
+        return CredentialManager.load_cookies("netease", self.account_id)
 
     # ==================== 请求控制 ====================
 

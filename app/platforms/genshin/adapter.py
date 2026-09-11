@@ -66,8 +66,8 @@ class GenshinAdapter(BasePlatformAdapter):
     ENKA_API = "https://enka.network/api/uid"
     TAKUMI_BINDING = "https://api-takumi.mihoyo.com/binding/api"
 
-    def __init__(self, credentials: dict = None):
-        super().__init__(credentials)
+    def __init__(self, credentials: dict = None, account_id: str = None):
+        super().__init__(credentials, account_id)
         self._session: requests.Session | None = None
         self._bind_session: requests.Session | None = None
         self._last_request_at = 0.0
@@ -94,7 +94,7 @@ class GenshinAdapter(BasePlatformAdapter):
 
     def _bind_api_session(self) -> requests.Session | None:
         """绑定 API 用的 session（只需 Cookie，不需要 DS 签名）"""
-        cookies = CredentialManager.load_cookies("genshin")
+        cookies = self._load_cookies()
         if not cookies:
             return None
         if self._bind_session is None:
@@ -351,11 +351,11 @@ class GenshinAdapter(BasePlatformAdapter):
         """深渊数据因米游社风控不可用"""
         return []
 
-    def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
-        return []
+    def get_follows(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
+        return [], False, -1
 
-    def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
-        return []
+    def get_followers(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
+        return [], False, -1
 
     def get_history(self, uid: str, period: str = "all") -> list:
         return []

@@ -19,8 +19,16 @@ URL 模式:
   /api/report/cross-platform?uids=..            跨平台汇总
 
 关系图谱:
-  /api/graph/search?keyword=..&platforms=..     跨平台搜索生成关系图
-  /api/graph/social (POST)                      展开节点社交关系
+  /api/graph/search?keyword=..&platforms=..&keywords=..  跨平台搜索生成关系图
+      keywords 为可选 JSON 对象（{"douyin":"戾清"}），给单个平台指定专属搜索词，
+      未指定的平台沿用 keyword；目标人物在各平台昵称不同时使用
+  /api/graph/social (POST)                      展开节点社交关系（同步单次）
+  /api/graph/expand/enqueue (POST)              展开任务批量入队（按平台隔离的后台队列）
+  /api/graph/expand/results                     增量轮询某图谱的展开结果
+  /api/graph/expand/stop (POST)                 停止某图谱的排队任务
+  /api/graph/expand/resume (POST)               恢复熔断暂停的平台队列
+  /api/graph/expand/status                      各平台队列状态
+  /api/graph/refresh_nodes (POST)               批量重新拉取节点信息（重新标记大V）
   /api/graph/save (POST)                        按名称保存当前图谱（同名覆盖）
   /api/graph/saved                              已保存图谱列表
   /api/graph/saved/<id>                         图谱完整数据（GET）/ 删除（DELETE）
@@ -29,19 +37,23 @@ URL 模式:
   /api/platforms                   列出所有平台
   /api/credentials                 查看/更新凭证
 """
+import json
 import time
 import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
-from app.platforms import get_adapter, list_platforms, reset_adapter
+from app.platforms import get_adapter, get_pool, list_platforms, reset_adapter, reset_pool
 from app.config import DEFAULT_TARGET_UID, DEFAULT_PLATFORM
 from app.data.store import DataStore
 from app.report.generator import ReportGenerator
 from app.credentials import CredentialManager
+from app.services.log_hub import get_log_hub
+from app.services.social_expander import expand_social, graph_user_node
+from app.services.expand_queue import get_expand_queue
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
@@ -71,8 +83,52 @@ def _log_fetch(method: str, platform: str, uid: str, success: bool, elapsed_ms: 
 
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+        # 同步推送到内存日志中枢（前端终端面板）
+        get_log_hub().publish(
+            line, level="success" if success else "error", source=f"fetch:{platform}"
+        )
     except Exception:
         pass  # 日志写入失败不影响主流程
+
+
+@bp.route("/logs/recent")
+def logs_recent():
+    """内存日志缓冲尾部（?after=seq 增量拉取，用于 SSE 降级轮询）"""
+    after = request.args.get("after", 0, type=int)
+    limit = min(request.args.get("limit", 200, type=int) or 200, 1000)
+    entries = get_log_hub().since(after)
+    if len(entries) > limit:
+        entries = entries[-limit:]
+    last_seq = entries[-1]["seq"] if entries else after
+    return _result({"entries": entries, "last_seq": last_seq})
+
+
+@bp.route("/logs/stream")
+def logs_stream():
+    """SSE 实时日志流；?after=seq 续传，15s 无新日志发 keepalive"""
+    after = request.args.get("after", 0, type=int)
+
+    def generate():
+        hub = get_log_hub()
+        last = after
+        # 先补发缓冲中已有的
+        for e in hub.since(last):
+            yield f"id: {e['seq']}\ndata: {json.dumps(e, ensure_ascii=False)}\n\n"
+            last = e["seq"]
+        while True:
+            entries = hub.wait_since(last, timeout=15.0)
+            if not entries:
+                yield ": keepalive\n\n"
+                continue
+            for e in entries:
+                yield f"id: {e['seq']}\ndata: {json.dumps(e, ensure_ascii=False)}\n\n"
+                last = e["seq"]
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 def get_store() -> DataStore:
@@ -180,6 +236,88 @@ def update_credentials(platform):
         return _error(str(e))
 
 
+# ==================== 多账号管理 ====================
+# 主账号 = credentials/<platform>_cookie.txt（上面的 /credentials 端点维护）
+# 附加账号 = credentials/accounts.json（本组端点维护），用于多账号并发查询
+
+@bp.route("/accounts/<platform>")
+def accounts_list(platform):
+    """列出平台的所有账号（主账号 + 附加账号）"""
+    if platform not in CredentialManager.PLATFORM_FILES:
+        return _error(f"未知平台: {platform}", http_status=404)
+
+    primary_cookies = CredentialManager.load_cookies(platform)
+    accounts = [{
+        "id": "primary",
+        "name": "主账号",
+        "primary": True,
+        "enabled": True,
+        "has_credential": bool(primary_cookies),
+        "cookie_keys": list(primary_cookies.keys()),
+    }]
+    for a in CredentialManager.get_accounts(platform):
+        keys = CredentialManager.parse_cookie_str(a.get("cookie", "")).keys()
+        accounts.append({
+            "id": a["id"],
+            "name": a.get("name") or a["id"],
+            "primary": False,
+            "enabled": bool(a.get("enabled", True)),
+            "has_credential": bool(a.get("cookie")),
+            "cookie_keys": list(keys),
+        })
+
+    return _result({
+        "platform": platform,
+        "accounts": accounts,
+        "pool_size": len([a for a in accounts if a["enabled"] and a["has_credential"]]),
+    })
+
+
+@bp.route("/accounts/<platform>", methods=["POST"])
+def accounts_add(platform):
+    """添加附加账号（body: {cookie, name?}）"""
+    if platform not in CredentialManager.PLATFORM_FILES:
+        return _error(f"未知平台: {platform}", http_status=404)
+    body = request.get_json(silent=True) or {}
+    try:
+        account = CredentialManager.add_account(
+            platform, str(body.get("cookie", "")), str(body.get("name") or "")
+        )
+    except ValueError as e:
+        return _error(str(e), http_status=400)
+    reset_pool(platform)
+    return _result({"id": account["id"], "name": account["name"]})
+
+
+@bp.route("/accounts/<platform>/<account_id>", methods=["POST"])
+def accounts_update(platform, account_id):
+    """更新附加账号（body: {name?, cookie?, enabled?}，字段可选）"""
+    if account_id == "primary":
+        return _error("主账号请通过 /credentials/<platform> 更新", http_status=400)
+    body = request.get_json(silent=True) or {}
+    account = CredentialManager.update_account(
+        platform, account_id,
+        name=body.get("name"),
+        cookie=body.get("cookie"),
+        enabled=body.get("enabled"),
+    )
+    if not account:
+        return _error("账号不存在", http_status=404)
+    reset_pool(platform)
+    return _result({"id": account["id"], "name": account["name"]})
+
+
+@bp.route("/accounts/<platform>/<account_id>", methods=["DELETE"])
+def accounts_delete(platform, account_id):
+    """删除附加账号"""
+    if account_id == "primary":
+        return _error("主账号不可删除，可通过 /credentials/<platform> 覆盖", http_status=400)
+    if not CredentialManager.remove_account(platform, account_id):
+        return _error("账号不存在", http_status=404)
+    reset_pool(platform)
+    return _result({"deleted": account_id})
+
+
 # ==================== 用户搜索（跨平台） ====================
 
 @bp.route("/<platform>/search")
@@ -255,29 +393,18 @@ def _search_user_cached(pid: str, keyword: str, limit: int, force: bool = False)
 
 
 def _graph_user_node(pid: str, u: dict):
-    """把平台返回的用户 dict 转成关系图节点；缺 uid/昵称的丢弃"""
-    uid = str(u.get("uid", "")).strip()
-    nickname = str(u.get("nickname", "")).strip()
-    if not uid or not nickname:
-        return None
-    node = {
-        "id": f"{pid}:{uid}",
-        "platform": pid,
-        "uid": uid,
-        "nickname": nickname,
-        "avatarUrl": u.get("avatarUrl", "") or "",
-        "fans": u.get("fans") or 0,
-        "signature": u.get("signature", "") or "",
-    }
-    if u.get("sec_uid"):
-        node["sec_uid"] = u["sec_uid"]
-    return node
+    """把平台返回的用户 dict 转成关系图节点；缺 uid/昵称的丢弃（与展开核心共用实现）"""
+    return graph_user_node(pid, u)
 
 
 @bp.route("/graph/search")
 def graph_search():
     """
     按关键词并行搜索各平台用户，聚合为关系图数据。
+
+    keyword 为主搜索词；keywords 参数（JSON 对象）可给单个平台指定专属搜索词
+    （目标人物在不同平台的昵称可能不同），未覆盖的平台沿用主关键词。
+    中心节点仍只保留一个（主关键词），各平台 hit 边照常挂在其下。
 
     节点: 关键词中心节点 + 用户节点（platform:uid）
     边:
@@ -302,15 +429,31 @@ def graph_search():
 
     refresh = request.args.get("refresh", "").strip() in ("1", "true")
 
+    # 各平台专属搜索词（JSON 对象）：非法值静默忽略，仅保留启用平台的非空覆盖
+    overrides: dict[str, str] = {}
+    raw_kw = request.args.get("keywords", "").strip()
+    if raw_kw:
+        try:
+            parsed = json.loads(raw_kw)
+            if isinstance(parsed, dict):
+                overrides = {
+                    str(k).strip(): str(v).strip()
+                    for k, v in parsed.items()
+                    if str(k).strip() and str(v).strip()
+                }
+        except (ValueError, TypeError):
+            overrides = {}
+    overrides = {k: v for k, v in overrides.items() if k in platform_ids}
+
     def _search_one(pid: str):
         try:
             adapter = get_adapter(pid)
             if not adapter:
                 return pid, [], None, False
-            users, from_cache = _search_user_cached(pid, keyword, limit, force=refresh)
+            users, from_cache = _search_user_cached(pid, overrides.get(pid) or keyword, limit, force=refresh)
             return pid, users, None, from_cache
         except Exception as e:
-            return pid, [], str(e), False
+            return pid, [], f"[账号：主账号] {e}", False
 
     results: dict[str, list] = {}
     errors: dict[str, str] = {}
@@ -359,6 +502,7 @@ def graph_search():
 
     return _result({
         "keyword": keyword,
+        "keywords": overrides,  # 本次实际生效的各平台专属搜索词（随图谱持久化，调出时还原）
         "searched": sorted(platform_ids),  # 本次实际请求的平台（含无结果的）
         "platforms": sorted(pid for pid, users in results.items() if users),
         "nodes": nodes,
@@ -367,6 +511,8 @@ def graph_search():
         "cached": sorted(cached_pids),  # 本次结果命中了 30 分钟缓存的平台
     })
 
+
+# ==================== 社交展开队列（按平台隔离，后台批量执行） ====================
 
 def _clamp_int(v, lo, hi, default):
     try:
@@ -378,149 +524,173 @@ def _clamp_int(v, lo, hi, default):
 @bp.route("/graph/social", methods=["POST"])
 def graph_social():
     """
-    展开某用户的社交关系，返回可合并进关系图的 nodes/edges。
-
-    请求体:
-      platform, uid            目标用户
-      follows_limit            拉取关注数（0 表示不拉，默认 100）
-      followers_limit          拉取粉丝数（0 表示不拉，默认 0）
-      known_ids                图中已有节点 id 列表（"platform:uid"），用于邻居互查对交集
-      intercheck_skip          已互查过的 uid 列表，跳过重复查询
-      intercheck_extra         图中与目标相邻、但不在本次拉取结果里的 uid，补查它们
-      intercheck_limit         最多互查多少个邻居（默认 40）
-      intercheck_follow_limit  每个邻居取多少条关注（默认 50）
-
-    互查: 对目标用户的每个邻居查其关注列表，与 known 同平台节点求交集，
-    得到 b→c 这类"邻居之间"的关注边。
+    展开某用户的社交关系（同步单次），返回可合并进关系图的 nodes/edges。
+    核心实现见 app/services/social_expander.py；批量/后台展开走 /graph/expand/* 队列接口。
     """
     body = request.get_json(silent=True) or {}
-    platform = str(body.get("platform", "")).strip()
-    uid = str(body.get("uid", "")).strip()
-    if not platform or not uid:
-        return _error("缺少 platform 或 uid", http_status=400)
+    try:
+        return _result(expand_social(body))
+    except ValueError as e:
+        return _error(str(e), http_status=400 if "缺少" in str(e) else 404)
 
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
 
-    follows_limit = _clamp_int(body.get("follows_limit", 100), 0, 200, 100)
-    followers_limit = _clamp_int(body.get("followers_limit", 0), 0, 200, 0)
-    intercheck_limit = _clamp_int(body.get("intercheck_limit", 40), 0, 60, 40)
-    intercheck_follow_limit = _clamp_int(body.get("intercheck_follow_limit", 50), 10, 100, 50)
+@bp.route("/graph/expand/enqueue", methods=["POST"])
+def graph_expand_enqueue():
+    """
+    把一批展开任务加入按平台隔离的后台队列。
 
-    known_uids = set()
-    for item in body.get("known_ids", []) or []:
-        pid, _, uid_part = str(item).partition(":")
-        if pid == platform and uid_part:
-            known_uids.add(uid_part)
-    known_uids.add(uid)
-    skip = {str(s) for s in body.get("intercheck_skip", []) or []}
+    请求体:
+      graph_id    所属图谱 id（结果轮询/停止都按它过滤；无 id 的临时图可传 null）
+      items       任务列表，每项: platform, uid, nickname?,
+                  follows_limit/followers_limit/follows_skip/followers_skip,
+                  known_ids, intercheck_skip/extra/limit/follow_limit
 
+    同图同 uid 已排队/执行中时自动去重；单图排队数超预算时拒绝。
+    返回 {queued, duplicates, rejected}
+    """
+    body = request.get_json(silent=True) or {}
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        return _error("缺少展开任务列表", http_status=400)
+    graph_id = body.get("graph_id")
+    try:
+        stats = get_expand_queue().enqueue(graph_id, items)
+    except Exception as e:
+        return _error(f"入队失败: {e}")
+    return _result(stats)
+
+
+@bp.route("/graph/expand/results")
+def graph_expand_results():
+    """
+    增量轮询某图谱的展开结果（前端合并进图后以返回的 cursor 续拉）。
+
+    query: graph_id, since_id（上次读到的任务 id，默认 0）, limit（默认 50）
+    返回 {results: [{id, platform, uid, nickname, status, result?, error?}],
+          cursor, pending, paused: [{platform, reason}]}
+    """
+    graph_id = request.args.get("graph_id", "").strip()
+    if not graph_id:
+        return _error("缺少 graph_id", http_status=400)
+    since_id = _clamp_int(request.args.get("since_id", 0), 0, 10**9, 0)
+    limit = _clamp_int(request.args.get("limit", 50), 1, 200, 50)
+    try:
+        data = get_expand_queue().results(graph_id, since_id, limit)
+    except Exception as e:
+        return _error(f"查询结果失败: {e}")
+    return _result(data)
+
+
+@bp.route("/graph/expand/stop", methods=["POST"])
+def graph_expand_stop():
+    """停止某图谱（可选 platform 限单平台）的排队任务；执行中的任务照常完成"""
+    body = request.get_json(silent=True) or {}
+    graph_id = body.get("graph_id")
+    if graph_id is None:
+        return _error("缺少 graph_id", http_status=400)
+    platform = str(body.get("platform", "")).strip() or None
+    cancelled = get_expand_queue().stop(graph_id, platform)
+    return _result({"cancelled": cancelled})
+
+
+@bp.route("/graph/expand/resume", methods=["POST"])
+def graph_expand_resume():
+    """恢复熔断暂停的平台队列；body.platform 为空时恢复全部"""
+    body = request.get_json(silent=True) or {}
+    platform = str(body.get("platform", "")).strip() or None
+    get_expand_queue().resume(platform)
+    return _result({"ok": True})
+
+
+@bp.route("/graph/expand/status")
+def graph_expand_status():
+    """各平台队列状态（排队/执行/暂停原因/账号数），供前端状态条展示"""
+    return _result({"queues": get_expand_queue().platform_status()})
+
+
+# 图谱"重新标记"单次最大节点数（防止一次提交过大拖死工作线程）
+GRAPH_REFRESH_MAX_NODES = 300
+
+
+@bp.route("/graph/refresh_nodes", methods=["POST"])
+def graph_refresh_nodes():
+    """
+    重新拉取一批图节点的最新信息（粉丝数/认证/昵称），用于修正旧图的大V判定。
+
+    请求体: {"nodes": [{"platform": "netease", "uid": "123"}, ...]}
+    逐个调用各平台 refresh_user_info；平台不支持或拉取失败时该项计入 errors。
+    返回: {"nodes": [{"id", "platform", "uid", "nickname", "fans", "verified"?}, ...],
+           "errors": {"platform:uid": "原因"}, "refreshed": 成功数}
+    """
+    body = request.get_json(silent=True) or {}
+    items = body.get("nodes")
+    if not isinstance(items, list) or not items:
+        return _error("缺少待刷新节点", http_status=400)
+    if len(items) > GRAPH_REFRESH_MAX_NODES:
+        return _error(f"单次最多刷新 {GRAPH_REFRESH_MAX_NODES} 个节点", http_status=400)
+
+    # 去重并按平台分组，保持原始顺序
+    ordered: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        pid = str((item or {}).get("platform", "")).strip()
+        uid = str((item or {}).get("uid", "")).strip()
+        if not pid or not uid or (pid, uid) in seen:
+            continue
+        seen.add((pid, uid))
+        ordered.append((pid, uid))
+
+    # 按平台分组，平台内通过账号池并行刷新（多账号时各节点租不同账号）
+    by_platform: dict[str, list[str]] = {}
+    for pid, uid in ordered:
+        by_platform.setdefault(pid, []).append(uid)
+
+    results: list[dict] = []
     errors: dict[str, str] = {}
-    follows_list: list = []
-    followers_list: list = []
 
-    def _fetch(name, fn, limit):
-        if limit <= 0:
-            return []
-        try:
-            return fn(uid, limit) or []
-        except Exception as e:
-            errors[name] = str(e)
-            return []
+    def _refresh_one(p_pool, uid: str):
+        with p_pool.lease() as ad:
+            if ad is None:
+                return uid, None, "无可用账号"
+            try:
+                info = ad.refresh_user_info(uid)
+                return uid, info, None
+            except Exception as e:
+                return uid, None, f"[账号：{p_pool.label_for(ad)}] {e}"
 
-    follows_list = _fetch("follows", adapter.get_follows, follows_limit)
-    followers_list = _fetch("followers", adapter.get_followers, followers_limit)
-
-    nodes: list[dict] = []
-    edges: list[dict] = []
-    edge_keys: set[tuple] = set()
-    neighbor_ids: list[str] = []  # 互查候选，关注在前粉丝在后，去重保序
-
-    def _add_edge(src_uid: str, dst_uid: str):
-        key = (src_uid, dst_uid)
-        if key in edge_keys or src_uid == dst_uid:
-            return
-        edge_keys.add(key)
-        edges.append({
-            "source": f"{platform}:{src_uid}",
-            "target": f"{platform}:{dst_uid}",
-            "relation": "follows",
-        })
-
-    seen_uids = {uid}
-    for u in follows_list:
-        node = _graph_user_node(platform, u)
-        if node is None or node["uid"] in seen_uids:
+    for pid, uids in by_platform.items():
+        p_pool = get_pool(pid)
+        if not p_pool:
+            for uid in uids:
+                errors[f"{pid}:{uid}"] = "未知平台"
             continue
-        seen_uids.add(node["uid"])
-        nodes.append(node)
-        neighbor_ids.append(node["uid"])
-        _add_edge(uid, node["uid"])
-    for u in followers_list:
-        node = _graph_user_node(platform, u)
-        if node is None or node["uid"] in seen_uids:
-            continue
-        seen_uids.add(node["uid"])
-        nodes.append(node)
-        neighbor_ids.append(node["uid"])
-        _add_edge(node["uid"], uid)
 
-    # ---- 邻居互查: 查邻居的关注列表，命中图中已有节点则建 b→c 边 ----
-    extra = [str(x) for x in body.get("intercheck_extra", []) or []]
-    ordered_targets = []
-    seen_targets = set()
-    for n in neighbor_ids + extra:
-        if n == uid or n in skip or n in seen_targets:
-            continue
-        seen_targets.add(n)
-        ordered_targets.append(n)
-    intercheck_targets = ordered_targets[:intercheck_limit]
+        if p_pool.size >= 2 and len(uids) >= 2:
+            with ThreadPoolExecutor(max_workers=min(p_pool.size, len(uids), 8)) as ex:
+                outcomes = list(ex.map(lambda u: _refresh_one(p_pool, u), uids))
+        else:
+            outcomes = [_refresh_one(p_pool, uid) for uid in uids]
 
-    def _intercheck(n_uid: str):
-        try:
-            follows = adapter.get_follows(n_uid, intercheck_follow_limit) or []
-        except Exception:
-            return []
-        out = []
-        for f in follows:
-            t = str(f.get("uid", "")).strip()
-            if t and t in known_uids and t != n_uid:
-                out.append((n_uid, t))
-        return out
+        for uid, info, err in outcomes:
+            if err:
+                errors[f"{pid}:{uid}"] = err
+                continue
+            if not info:
+                errors[f"{pid}:{uid}"] = "平台不支持或未获取到数据"
+                continue
+            node = {
+                "id": f"{pid}:{uid}",
+                "platform": pid,
+                "uid": uid,
+                "nickname": str(info.get("nickname", "")),
+                "fans": int(info.get("fans") or 0),
+            }
+            # 认证字段仅在平台返回时下发，前端保留原值
+            if info.get("is_verified") is not None:
+                node["verified"] = bool(info.get("is_verified"))
+            results.append(node)
 
-    intercheck_edges: list[dict] = []
-    if intercheck_targets:
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            for pairs in pool.map(_intercheck, intercheck_targets):
-                for src, dst in pairs:
-                    key = (src, dst)
-                    if key in edge_keys:
-                        continue
-                    edge_keys.add(key)
-                    intercheck_edges.append({
-                        "source": f"{platform}:{src}",
-                        "target": f"{platform}:{dst}",
-                        "relation": "follows",
-                    })
-
-    return _result({
-        "platform": platform,
-        "uid": uid,
-        "counts": {
-            "follows": len(follows_list),
-            "followers": len(followers_list),
-        },
-        "nodes": nodes,
-        "edges": edges,
-        "intercheck": {
-            "checked": len(intercheck_targets),
-            "total": len(ordered_targets),
-            "targets": intercheck_targets,
-            "edges": intercheck_edges,
-        },
-        "errors": errors,
-    })
+    return _result({"nodes": results, "errors": errors, "refreshed": len(results)})
 
 
 # ==================== 关系图谱持久化（命名保存 / 侧边栏调出） ====================
@@ -730,7 +900,8 @@ def user_follows(platform):
     if not adapter:
         return _error(f"未知平台: {platform}", http_status=404)
     try:
-        return _result(adapter.get_follows(uid))
+        items, _more, _total = adapter.get_follows(uid)
+        return _result(items)
     except Exception as e:
         return _error(str(e))
 
@@ -744,7 +915,8 @@ def user_followers(platform):
     if not adapter:
         return _error(f"未知平台: {platform}", http_status=404)
     try:
-        return _result(adapter.get_followers(uid))
+        items, _more, _total = adapter.get_followers(uid)
+        return _result(items)
     except Exception as e:
         return _error(str(e))
 
@@ -961,7 +1133,7 @@ def platform_all(platform):
         # 关注（同时保存快照供变化检测）
         result["follows"] = []
         try:
-            follows_list = adapter.get_follows(uid)
+            follows_list, _more, _total = adapter.get_follows(uid)
             result["follows"] = follows_list
             if follows_list:
                 get_store().save_snapshot(platform, uid, "follows", {
@@ -974,7 +1146,7 @@ def platform_all(platform):
         # 粉丝（同时保存快照供变化检测）
         result["followers"] = []
         try:
-            followers_list = adapter.get_followers(uid)
+            followers_list, _more, _total = adapter.get_followers(uid)
             result["followers"] = followers_list
             if followers_list:
                 get_store().save_snapshot(platform, uid, "followers", {
@@ -1375,62 +1547,6 @@ def delete_timeline_entry(entry_id):
             return _error("条目不存在", http_status=404)
     except Exception as e:
         return _error(str(e))
-
-
-# ==================== 采集器控制 ====================
-
-@bp.route("/collector/status")
-def collector_status():
-    """获取自动采集器状态"""
-    from app.services.scheduler import get_collector
-    c = get_collector()
-    return _result(c.status)
-
-
-@bp.route("/collector/start", methods=["POST"])
-def collector_start():
-    """启动自动采集"""
-    from app.services.scheduler import get_collector
-    c = get_collector()
-    body = request.get_json(force=True, silent=True) or {}
-    targets = body.get("targets", {})
-    interval = int(body.get("interval_minutes", 30))
-
-    if targets:
-        c.set_targets(targets)
-    c.interval = interval * 60
-    c.start()
-    return _result({"message": "采集器已启动", "status": c.status})
-
-
-@bp.route("/collector/stop", methods=["POST"])
-def collector_stop():
-    """停止自动采集"""
-    from app.services.scheduler import get_collector
-    c = get_collector()
-    c.stop()
-    return _result({"message": "采集器已停止", "status": c.status})
-
-
-@bp.route("/collector/collect", methods=["POST"])
-def collector_collect_once():
-    """手动触发一次采集（需先启动采集器设置 targets）"""
-    from app.services.scheduler import get_collector
-    c = get_collector()
-    try:
-        entries = c.collect_once()
-        return _result({"message": "采集完成", "entries": entries})
-    except Exception as e:
-        return _error(str(e))
-
-
-@bp.route("/collector/logs")
-def collector_logs():
-    """获取采集器最近日志"""
-    from app.services.scheduler import get_collector
-    c = get_collector()
-    limit = int(request.args.get("limit", 50))
-    return _result(c.get_recent_logs(limit))
 
 
 # ==================== 歌单歌曲异步拉取 ====================

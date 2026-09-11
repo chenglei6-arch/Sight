@@ -98,6 +98,26 @@ class DataStore:
                     updated_at  TEXT    NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS expand_tasks (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform      TEXT    NOT NULL,
+                    uid           TEXT    NOT NULL,
+                    nickname      TEXT    DEFAULT '',
+                    graph_id      INTEGER,
+                    params_json   TEXT    NOT NULL DEFAULT '{}',
+                    known_ids_json TEXT   DEFAULT '[]',
+                    status        TEXT    NOT NULL DEFAULT 'pending',
+                    result_json   TEXT,
+                    error         TEXT,
+                    created_at    TEXT    NOT NULL,
+                    updated_at    TEXT    NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_expand_task_graph
+                ON expand_tasks(graph_id, status, id)
+            """)
             conn.commit()
 
     # ==================== 哈希计算 ====================
@@ -530,6 +550,115 @@ class DataStore:
             conn.execute("DELETE FROM graphs WHERE id=?", (graph_id,))
             conn.commit()
             return conn.total_changes > 0
+
+    # ==================== 社交展开队列持久化 ====================
+
+    def insert_expand_task(
+        self,
+        platform: str,
+        uid: str,
+        nickname: str,
+        graph_id,
+        params: dict,
+        known_ids: list,
+    ) -> int:
+        """登记一个待执行的展开任务，返回任务 id"""
+        now = _now_iso()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO expand_tasks "
+                "(platform, uid, nickname, graph_id, params_json, known_ids_json, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                (
+                    platform, uid, nickname, graph_id,
+                    json.dumps(params, ensure_ascii=False),
+                    json.dumps(known_ids, ensure_ascii=False),
+                    now, now,
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+    def update_expand_task(self, task_id: int, status: str, result: dict = None, error: str = None):
+        """回写任务状态；done 时存结果载荷，failed/cancelled 时存原因"""
+        sets = ["status=?", "updated_at=?"]
+        params: list = [status, _now_iso()]
+        if result is not None:
+            sets.append("result_json=?")
+            params.append(json.dumps(result, ensure_ascii=False))
+        if error is not None:
+            sets.append("error=?")
+            params.append(error)
+        params.append(task_id)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE expand_tasks SET {', '.join(sets)} WHERE id=?", params)
+            conn.commit()
+
+    def get_recoverable_expand_tasks(self) -> list[dict]:
+        """获取中断遗留的任务（pending/running，服务重启后重新入队）"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM expand_tasks WHERE status IN ('pending', 'running') ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_expand_results(self, graph_id, since_id: int = 0, limit: int = 50) -> list[dict]:
+        """按 id 增量获取已完结任务（done/failed/cancelled），供前端轮询合并"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, platform, uid, nickname, graph_id, status, result_json, error, params_json, updated_at "
+                "FROM expand_tasks WHERE graph_id=? AND id>? AND status IN ('done','failed','cancelled') "
+                "ORDER BY id LIMIT ?",
+                (graph_id, since_id, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            item = dict(r)
+            item["result"] = json.loads(item.pop("result_json")) if item["result_json"] else None
+            # 提取任务请求的方向（limit>0 即请求了该方向），前端据此累计进度与展开标记
+            dirs = {"follows": False, "followers": False}
+            try:
+                params = json.loads(item.pop("params_json") or "{}")
+                dirs["follows"] = int(params.get("follows_limit") or 0) > 0
+                dirs["followers"] = int(params.get("followers_limit") or 0) > 0
+            except (ValueError, TypeError):
+                pass
+            item["dirs"] = dirs
+            out.append(item)
+        return out
+
+    def count_expand_tasks(self, graph_id, statuses: list[str]) -> int:
+        """统计某图谱指定状态的任务数（预算/轮询终止判断用）"""
+        marks = ",".join("?" for _ in statuses)
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS c FROM expand_tasks WHERE graph_id=? AND status IN ({marks})",
+                [graph_id] + statuses,
+            ).fetchone()
+        return row["c"] if row else 0
+
+    def cancel_pending_expand_tasks(self, graph_id, platform: str = None) -> int:
+        """把某图谱（可限平台）的 pending 任务标记为 cancelled。返回取消数量。"""
+        sql = "UPDATE expand_tasks SET status='cancelled', error='用户停止', updated_at=? WHERE graph_id=? AND status='pending'"
+        params: list = [_now_iso(), graph_id]
+        if platform:
+            sql += " AND platform=?"
+            params.append(platform)
+        with self._connect() as conn:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    def purge_old_expand_tasks(self, keep_hours: int = 24) -> int:
+        """清理超过保留期的已完结任务，防止表无限膨胀"""
+        cutoff = (datetime.now(CST) - timedelta(hours=keep_hours)).isoformat(timespec="seconds")
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM expand_tasks WHERE status IN ('done','failed','cancelled') AND updated_at < ?",
+                (cutoff,),
+            )
+            conn.commit()
+            return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
     # ==================== 变化检测辅助 ====================
 

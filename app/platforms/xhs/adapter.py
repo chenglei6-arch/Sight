@@ -42,13 +42,14 @@ class XhsAdapter(BasePlatformAdapter):
     platform_id = "xhs"
     platform_name = "小红书"
 
-    def __init__(self, credentials: dict = None, mode: str = "pc"):
+    def __init__(self, credentials: dict = None, mode: str = "pc", account_id: str = None):
         """
         Args:
             credentials: 凭证字典
             mode: "pc" 或 "creator"
+            account_id: 多账号池绑定的账号 ID（None = 主账号）
         """
-        super().__init__(credentials)
+        super().__init__(credentials, account_id)
         self.mode = mode
         self._auth_pc = None
         self._auth_creator = None
@@ -65,7 +66,7 @@ class XhsAdapter(BasePlatformAdapter):
         加载小红书 Cookie 字符串
         优先级: credentials/xhs_cookie.txt → .env XHS_COOKIES
         """
-        cookies = CredentialManager.load_cookies("xhs")
+        cookies = self._load_cookies()
         if cookies:
             cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
             print(f"[小红书] 从 credentials/xhs_cookie.txt 加载: {len(cookies)} 个字段")
@@ -194,7 +195,7 @@ class XhsAdapter(BasePlatformAdapter):
 
     def check_alive(self) -> bool:
         """检查凭证是否有效"""
-        cookies = CredentialManager.load_cookies("xhs")
+        cookies = self._load_cookies()
         if not cookies:
             return False
         try:
@@ -264,6 +265,9 @@ class XhsAdapter(BasePlatformAdapter):
                     "nickname": user.get("nickname") or user.get("nick_name") or user.get("name", ""),
                     "avatarUrl": user.get("avatar") or user.get("images") or user.get("image", ""),
                     "signature": user.get("desc") or user.get("description") or user.get("sub_title", ""),
+                    # 搜索卡片可能带粉丝数与认证标记（official_verified / red_official_verify_type）
+                    "fans": user.get("fans") or 0,
+                    "is_verified": bool(user.get("official_verified")) or bool(user.get("red_official_verify_type")),
                 })
             return results
         except Exception as e:
@@ -411,10 +415,17 @@ class XhsAdapter(BasePlatformAdapter):
 
     # ==================== 社交 ====================
 
-    def get_follows(self, uid: str, limit: int = 100) -> list[dict]:
-        """获取关注列表 — 暂不支持"""
-        return []
+    def refresh_user_info(self, uid: str) -> Optional[dict]:
+        """重新拉取用户最新粉丝数（图谱"重新标记"用）；小红书资料接口无认证标记，不更新该字段"""
+        profile = self.get_profile(uid)
+        if not profile:
+            return None
+        return {"nickname": profile.nickname, "fans": profile.extra.get("fans") or 0}
 
-    def get_followers(self, uid: str, limit: int = 100) -> list[dict]:
-        """获取粉丝列表 — 暂不支持"""
-        return []
+    def get_follows(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
+        """获取关注列表 — 暂不支持。返回 (条目, 还有更多, 总数)"""
+        return [], False, -1
+
+    def get_followers(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
+        """获取粉丝列表 — 暂不支持。返回 (条目, 还有更多, 总数)"""
+        return [], False, -1

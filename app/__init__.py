@@ -27,6 +27,10 @@ def create_app() -> Flask:
     )
     app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 
+    # 镜像 stdout/stderr 到内存日志中枢（前端终端面板的数据源）
+    from app.services.log_hub import install_tee
+    install_tee()
+
     # 注册路由
     from app.routes.api import bp as api_bp
     from app.routes.views import bp as views_bp
