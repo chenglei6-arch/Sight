@@ -88,6 +88,7 @@ async function removeGraph(g) {
       </button>
       <div v-if="state.savedGraphsError" class="nav-graph-err">{{ state.savedGraphsError }}</div>
     </nav>
+    <div v-if="state.platformsMetaError" class="nav-graph-err">{{ state.platformsMetaError }}</div>
   </aside>
 </template>
 

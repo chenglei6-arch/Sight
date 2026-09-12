@@ -62,15 +62,17 @@ async function loadAll() {
   loadingStatus.value = true
   try {
     status.value = await api.get(`/credentials/${selPlatform.value}`)
-  } catch {
-    status.value = { has_credential: false, cookie_keys: [] }
+    accounts.value = await api.get(`/accounts/${selPlatform.value}`)
+    message.value = ''
+    messageIsError.value = false
+  } catch (e) {
+    // 后端不可达时如实提示，而不是伪装成"未配置 Cookie"
+    status.value = null
+    accounts.value = null
+    message.value = '加载凭证状态失败：' + e.message
+    messageIsError.value = true
   } finally {
     loadingStatus.value = false
-  }
-  try {
-    accounts.value = await api.get(`/accounts/${selPlatform.value}`)
-  } catch {
-    accounts.value = { accounts: [], pool_size: 0 }
   }
 }
 

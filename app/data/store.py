@@ -240,35 +240,30 @@ class DataStore:
         now = _now_iso()
         with self._connect() as conn:
             for entry in entries:
-                dedup = entry.dedup_key()
                 time_range = getattr(entry, "time_range", {}) or {}
-                try:
-                    conn.execute(
-                        """INSERT OR IGNORE INTO timeline
-                        (platform, uid, event_type, timestamp, time_str, time_suffix,
-                         summary, detail, time_range_since, time_range_until,
-                         raw_json, dedup_key, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            entry.platform,
-                            entry.uid,
-                            entry.event_type,
-                            entry.timestamp,
-                            entry.time_str,
-                            entry.time_suffix,
-                            entry.summary,
-                            entry.detail,
-                            time_range.get("since", ""),
-                            time_range.get("until", ""),
-                            json.dumps(entry.raw, ensure_ascii=False),
-                            dedup,
-                            now,
-                        ),
-                    )
-                    if conn.execute("SELECT changes()").fetchone()[0] > 0:
-                        inserted += 1
-                except Exception as e:
-                    print(f"[DataStore] 时间线插入失败 ({dedup}): {e}")
+                cur = conn.execute(
+                    """INSERT OR IGNORE INTO timeline
+                    (platform, uid, event_type, timestamp, time_str, time_suffix,
+                     summary, detail, time_range_since, time_range_until,
+                     raw_json, dedup_key, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        entry.platform,
+                        entry.uid,
+                        entry.event_type,
+                        entry.timestamp,
+                        entry.time_str,
+                        entry.time_suffix,
+                        entry.summary,
+                        entry.detail,
+                        time_range.get("since", ""),
+                        time_range.get("until", ""),
+                        json.dumps(entry.raw, ensure_ascii=False),
+                        entry.dedup_key(),
+                        now,
+                    ),
+                )
+                inserted += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
             conn.commit()
         print(f"[DataStore] 时间线持久化: 收到 {len(entries)} 条，新增 {inserted} 条")
         return inserted

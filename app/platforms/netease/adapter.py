@@ -248,11 +248,10 @@ class NeteaseAdapter(BasePlatformAdapter):
                 if len(result) >= limit:
                     break
                 info = ev.get("info", {})
-                json_data = {}
                 try:
                     json_data = json.loads(ev.get("json", "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    raise RuntimeError(f"[网易云] 动态 json 字段解析失败 (event={ev.get('id')}): {e}") from e
 
                 media_title = ""
                 media_artist = ""

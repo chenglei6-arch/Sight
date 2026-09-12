@@ -199,14 +199,14 @@ class XhsAdapter(BasePlatformAdapter):
     # ==================== 用户资料 ====================
 
     def get_profile(self, uid: str) -> Optional[PlatformProfile]:
-        """获取用户资料"""
+        """获取用户资料（接口失败上抛真实原因）"""
+        if not self.api_pc:
+            raise RuntimeError("小红书客户端未初始化（请检查 Cookie 是否已配置/有效）")
         try:
-            if not self.api_pc:
-                return None
             self._rate_limit()
             success, msg, res = self.api_pc.get_user_info(uid)
             if not success or not res:
-                return None
+                raise RuntimeError(f"[小红书] 获取资料失败: {msg or '接口返回失败'}")
 
             data = res.get("data", {})
             basic = data.get("basic_info") or data
@@ -255,23 +255,26 @@ class XhsAdapter(BasePlatformAdapter):
                     "notes_count": basic.get("notes_count", 0),
                 },
             )
-        except Exception as e:
-            print(f"[小红书] get_profile 失败: {e}")
-            return None
+        except RuntimeError:
+            raise
+        except (ValueError, AttributeError, TypeError) as e:
+            raise RuntimeError(f"[小红书] 获取资料失败 ({uid}): {e}") from e
 
     # ==================== 内容列表 ====================
 
     def get_content_lists(self, uid: str) -> list[ContentItem]:
         """获取用户的笔记列表"""
-        try:
-            if not self.api_pc:
-                return []
+        if not self.api_pc:
+            raise RuntimeError("小红书客户端未初始化（请检查 Cookie 是否已配置/有效）")
 
+        try:
             # 构建用户主页 URL
             user_url = f"https://www.xiaohongshu.com/user/profile/{uid}"
             self._rate_limit()
             success, msg, res = self.api_pc.get_user_all_notes(user_url)
-            if not success or not res:
+            if not success:
+                raise RuntimeError(f"[小红书] 获取笔记列表失败: {msg or '接口返回失败'}")
+            if not res:
                 return []
 
             items = []
@@ -305,9 +308,10 @@ class XhsAdapter(BasePlatformAdapter):
                     },
                 ))
             return items
-        except Exception as e:
-            print(f"[小红书] get_content_lists 失败: {e}")
-            return []
+        except RuntimeError:
+            raise
+        except (ValueError, AttributeError, TypeError) as e:
+            raise RuntimeError(f"[小红书] 笔记列表解析失败 ({uid}): {e}") from e
 
     # ==================== 动态 ====================
 

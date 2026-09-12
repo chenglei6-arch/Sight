@@ -103,8 +103,8 @@ class PlatformQueue:
         for t in removed:
             try:
                 self._store.update_expand_task(t.id, "cancelled", error=reason)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ExpandQueue] 任务 {t.id} 取消状态落库失败: {e}")
         return len(removed)
 
     def resume(self):
@@ -145,8 +145,8 @@ class PlatformQueue:
             self._in_flight[task.id] = task
             try:
                 self._store.update_expand_task(task.id, "running")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ExpandQueue] 任务 {task.id} running 状态落库失败: {e}")
             try:
                 payload = expand_social(task.params)
                 self._finish(task, payload)
@@ -223,8 +223,8 @@ class ExpandQueueManager:
         self._recovered = True
         try:
             self._store.purge_old_expand_tasks()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ExpandQueue] 清理过期任务失败: {e}")
         try:
             rows = self._store.get_recoverable_expand_tasks()
         except Exception as e:
@@ -287,10 +287,7 @@ class ExpandQueueManager:
                 duplicates += 1
                 continue
             # 预算：单图排队任务数上限
-            try:
-                pending = self._store.count_expand_tasks(graph_id, ["pending", "running"])
-            except Exception:
-                pending = 0
+            pending = self._store.count_expand_tasks(graph_id, ["pending", "running"])
             if pending >= MAX_PENDING_PER_GRAPH:
                 rejected += 1
                 continue
@@ -298,15 +295,10 @@ class ExpandQueueManager:
             params["platform"] = platform
             params["uid"] = uid
             known_ids = params.pop("known_ids", []) or []
-            try:
-                task_id = self._store.insert_expand_task(
-                    platform, uid, str(params.get("nickname", "") or ""),
-                    graph_id, params, known_ids,
-                )
-            except Exception as e:
-                print(f"[ExpandQueue] 任务登记失败: {e}")
-                rejected += 1
-                continue
+            task_id = self._store.insert_expand_task(
+                platform, uid, str(params.get("nickname", "") or ""),
+                graph_id, params, known_ids,
+            )
             task = ExpandTask(id=task_id, platform=platform, uid=uid,
                               nickname=str(params.get("nickname", "") or ""),
                               graph_id=graph_id, params={**params, "known_ids": known_ids})
@@ -317,8 +309,8 @@ class ExpandQueueManager:
                 # 队列满：回滚登记记录
                 try:
                     self._store.update_expand_task(task_id, "cancelled", error="平台队列已满")
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[ExpandQueue] 任务 {task_id} 回滚落库失败: {e}")
                 rejected += 1
         return {
             "queued": queued, "duplicates": duplicates, "rejected": rejected,
@@ -335,10 +327,7 @@ class ExpandQueueManager:
                 continue
             cancelled += q.cancel_pending(lambda t, g=graph_id: t.graph_id == graph_id)
         if graph_id is not None:
-            try:
-                cancelled += self._store.cancel_pending_expand_tasks(graph_id, platform)
-            except Exception:
-                pass
+            cancelled += self._store.cancel_pending_expand_tasks(graph_id, platform)
         return cancelled
 
     def resume(self, platform: str = None):
@@ -372,10 +361,7 @@ class ExpandQueueManager:
         return out
 
     def graph_pending(self, graph_id) -> int:
-        try:
-            return self._store.count_expand_tasks(graph_id, ["pending", "running"])
-        except Exception:
-            return 0
+        return self._store.count_expand_tasks(graph_id, ["pending", "running"])
 
     def results(self, graph_id, since_id: int = 0, limit: int = 50) -> dict:
         """增量拉取完结任务 + 当前图的排队余量 + 暂停中的队列（一次轮询全知道）"""

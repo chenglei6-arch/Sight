@@ -338,6 +338,7 @@ def main():
             write_status({"status": "fetching"})
 
             follows = []
+            follow_error = None
             target_uin = ""
 
             try:
@@ -437,7 +438,8 @@ def main():
                                 target_uin = TARGET_UID.replace("*", "")
                 except Exception as e:
                     (TMP_DIR / "qr_search_error.log").write_text(str(e), encoding="utf-8")
-                    # fallback: 用 TARGET_UID 试试
+                    # 搜索失败回退到默认目标 UID，并在结果中注明
+                    follow_error = f"目标用户搜索失败（已回退默认 UID）: {e}"
                     if TARGET_UID.replace("*", "").isdigit():
                         target_uin = TARGET_UID.replace("*", "")
 
@@ -467,13 +469,14 @@ def main():
                                             "signature": "",
                                         })
                     except Exception as e:
+                        follow_error = f"关注列表拉取失败: {e}"
                         (TMP_DIR / "qr_follow_error.log").write_text(str(e), encoding="utf-8")
-                else:
-                    # 没有目标用户的 UIN
-                    pass
+                elif not follow_error:
+                    follow_error = "未定位到目标用户的 UIN，无法获取关注列表"
 
             except Exception as e:
                 import traceback
+                follow_error = f"登录后数据抓取失败: {type(e).__name__}: {e}"
                 (TMP_DIR / "qr_fetch_error.log").write_text(
                     f"{type(e).__name__}: {e}\n{traceback.format_exc()}", encoding="utf-8"
                 )
@@ -491,6 +494,7 @@ def main():
                     "found_uin": target_uin,
                     "count": len(follows),
                     "follows": follows[:50],
+                    "error": follow_error,
                 },
             })
 

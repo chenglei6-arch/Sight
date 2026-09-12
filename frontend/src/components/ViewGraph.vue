@@ -765,6 +765,7 @@ function sleep(ms) {
 
 async function pollQueueLoop() {
   const myGen = queuePoll.gen
+  let failCount = 0
   while (queuePoll.active) {
     const gid = state.activeGraphId
     if (gid == null) break
@@ -775,8 +776,16 @@ async function pollQueueLoop() {
         since_id: queuePoll.cursors.get(gid) || 0,
         limit: 50,
       })
-    } catch {
-      await sleep(2000) // 网络抖动：下一轮再试，不中断循环
+      failCount = 0
+    } catch (e) {
+      failCount += 1
+      // 网络抖动：下一轮再试；连续失败达到阈值时如实告知，不再装作"后台执行中"
+      if (failCount >= 5) {
+        const msg = `轮询展开结果连续失败 ${failCount} 次：${e.message}`
+        if (bulk.busy) bulkMsg.value = msg
+        else console.warn('[ViewGraph]', msg)
+      }
+      await sleep(2000)
       continue
     }
     let changed = false

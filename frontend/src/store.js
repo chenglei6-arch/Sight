@@ -63,6 +63,7 @@ export const state = reactive({
   view: 'netease',
   uids: loadStoredUids(),
   platformsMeta: [], // /api/platforms：[{id, name, has_credential, is_alive, login_user}]
+  platformsMetaError: '', // 平台状态加载失败原因（侧边栏展示，空=正常）
   data: {}, // 平台 id -> blankPlatformData() + /all 载荷
   timeline: {
     loading: false,
@@ -178,8 +179,10 @@ export async function searchUsers(platformId, keyword) {
 export async function loadPlatformsMeta() {
   try {
     state.platformsMeta = (await api.get('/platforms')) || []
-  } catch {
+    state.platformsMetaError = ''
+  } catch (e) {
     state.platformsMeta = []
+    state.platformsMetaError = `平台状态加载失败：${e.message}`
   }
 }
 

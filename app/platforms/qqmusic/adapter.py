@@ -153,6 +153,7 @@ class QQMusicAdapter(BasePlatformAdapter):
         all_params.update(params)
         all_params.setdefault("g_tk", self._g_tk)
 
+        last_error = "未知错误"
         for attempt in range(MAX_RETRIES):
             try:
                 self._rate_limit()
@@ -170,13 +171,15 @@ class QQMusicAdapter(BasePlatformAdapter):
                     time.sleep(wait)
                     continue
                 print(f"[QQ音乐] HTTP {resp.status_code} path={path}")
+                last_error = f"HTTP {resp.status_code}"
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
             except requests.RequestException as e:
+                last_error = str(e)
                 print(f"[QQ音乐] 请求异常: {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
-        return {}
+        raise RuntimeError(f"[QQ音乐] GET {path} 失败: {last_error}")
 
     def _api_post_json(self, path: str, json_body: dict = None) -> dict:
         """
@@ -207,6 +210,7 @@ class QQMusicAdapter(BasePlatformAdapter):
         json_body["comm"].setdefault("ct", 24)
         json_body["comm"].setdefault("cv", 0)
 
+        last_error = "未知错误"
         for attempt in range(MAX_RETRIES):
             try:
                 self._rate_limit()
@@ -223,13 +227,15 @@ class QQMusicAdapter(BasePlatformAdapter):
                     time.sleep(wait)
                     continue
                 print(f"[QQ音乐] HTTP {resp.status_code} path={path}")
+                last_error = f"HTTP {resp.status_code}"
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
             except requests.RequestException as e:
+                last_error = str(e)
                 print(f"[QQ音乐] POST 请求异常: {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
-        return {}
+        raise RuntimeError(f"[QQ音乐] POST {path} 失败: {last_error}")
 
     @staticmethod
     def _parse_response(text: str) -> dict:
@@ -256,8 +262,8 @@ class QQMusicAdapter(BasePlatformAdapter):
             # 尝试去掉末尾的分号
             try:
                 return json.loads(json_str.rstrip(";"))
-            except json.JSONDecodeError:
-                return {}
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"[QQ音乐] 响应解析失败（疑似风控/登录页）: {e}；前 120 字符: {text[:120]!r}") from e
 
     def _curl_get(self, url: str, timeout: int = 15) -> str:
         """
@@ -302,21 +308,19 @@ class QQMusicAdapter(BasePlatformAdapter):
 
     def _get_curl_cookie_str(self) -> str:
         """从当前会话提取 Cookie 字符串传给 curl"""
-        try:
-            parts = []
-            for c in self.session.cookies:
-                if c.value:
-                    parts.append(f"{c.name}={c.value}")
-            return "; ".join(parts)
-        except Exception:
-            return ""
+        parts = []
+        for c in self.session.cookies:
+            if c.value:
+                parts.append(f"{c.name}={c.value}")
+        return "; ".join(parts)
 
     def _fetch_html(self, url: str) -> str:
         """
         请求页面 HTML。
 
-        优先使用 Python requests，SSL 失败时降级为 curl。
+        优先使用 Python requests，SSL 失败时降级为 curl；失败时抛 RuntimeError。
         """
+        last_error = "未知错误"
         for attempt in range(MAX_RETRIES):
             try:
                 self._rate_limit()
@@ -336,9 +340,12 @@ class QQMusicAdapter(BasePlatformAdapter):
                     print(f"[QQ音乐] curl 也失败")
                 else:
                     print(f"[QQ音乐] 页面请求异常: {e}")
+                last_error = str(e)
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1)
-        return ""
+            else:
+                last_error = f"HTTP {resp.status_code}"
+        raise RuntimeError(f"[QQ音乐] 页面请求失败: {last_error}, url={url[:80]}")
 
     def _fetch_ssr_page(self, uid: str) -> str:
         """
@@ -414,12 +421,7 @@ class QQMusicAdapter(BasePlatformAdapter):
                 },
             }
         }
-        try:
-            raw = self._api_post_json("/cgi-bin/musicu.fcg", body)
-        except Exception as e:
-            print(f"[QQ音乐] musicu.fcg 搜索失败: {e}")
-            raise
-
+        raw = self._api_post_json("/cgi-bin/musicu.fcg", body)
         if not raw:
             return []
 
@@ -515,9 +517,14 @@ class QQMusicAdapter(BasePlatformAdapter):
         # 手机版 SSR 页面
         profile = self._get_profile_via_mobile_ssr(uid)
 
-        # 附加关注/粉丝数（通过 fcg API，仅对 encrypt_uin 可见）
+        # 附加关注/粉丝数（通过 fcg API，仅对 encrypt_uin 可见）；
+        # 统计是附加信息，失败不影响资料本身
         if profile and not uid.isdigit():
-            fcg_stats = self._try_get_follow_count_via_fcg(uid)
+            try:
+                fcg_stats = self._try_get_follow_count_via_fcg(uid)
+            except RuntimeError as e:
+                print(f"[QQ音乐] {e}")
+                fcg_stats = None
             if fcg_stats:
                 if profile.extra is None:
                     profile.extra = {}
@@ -643,9 +650,10 @@ class QQMusicAdapter(BasePlatformAdapter):
                 gender=gender, extra=extra,
             )
 
-        except Exception as e:
-            print(f"[QQ音乐] 手机版 SSR 获取失败 ({uid}): {e}")
-            return None
+        except RuntimeError:
+            raise
+        except (ValueError, AttributeError, TypeError) as e:
+            raise RuntimeError(f"[QQ音乐] SSR 资料页解析失败 ({uid}): {e}") from e
 
     # ==================== 歌单 ====================
 
@@ -719,9 +727,10 @@ class QQMusicAdapter(BasePlatformAdapter):
                 print(f"[QQ音乐] 手机版 SSR 获取到 {len(items)} 个歌单")
             return items
 
-        except Exception as e:
-            print(f"[QQ音乐] 手机版 SSR 歌单提取失败: {e}")
-            return []
+        except RuntimeError:
+            raise
+        except (ValueError, AttributeError, TypeError) as e:
+            raise RuntimeError(f"[QQ音乐] SSR 歌单页解析失败: {e}") from e
 
     def _diss_to_content_item(self, diss: dict, seen: set) -> Optional[ContentItem]:
         """从 DissList 中的单个歌单条目构建 ContentItem"""
@@ -753,16 +762,9 @@ class QQMusicAdapter(BasePlatformAdapter):
         """
         获取用户的歌单列表
 
-        唯一方式: 手机版 SSR 页面提取 DissList
+        唯一方式: 手机版 SSR 页面提取 DissList；页面请求失败时异常上抛。
         """
-        try:
-            items = self._get_playlists_via_mobile_ssr(uid)
-            if items:
-                return items
-        except Exception as e:
-            print(f"[QQ音乐] 手机版 SSR 歌单获取失败: {e}")
-
-        return []
+        return self._get_playlists_via_mobile_ssr(uid)
 
     def get_content_detail(self, item_id: str) -> Optional[dict]:
         """
@@ -898,7 +900,7 @@ class QQMusicAdapter(BasePlatformAdapter):
         except json.JSONDecodeError:
             return {}
 
-    def _fetch_follow_list(self, uin: str, start: int, num: int, is_listen: int = 0) -> Optional[dict]:
+    def _fetch_follow_list(self, uin: str, start: int, num: int, is_listen: int = 0) -> dict:
         """
         获取关注/粉丝列表单页数据。
 
@@ -910,9 +912,13 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         Returns:
             解析后的响应 dict, 包含 total, list 等字段
+        Raises:
+            RuntimeError: 接口错误/风控/超时（含粉丝 API 已知的服务端不稳定），不静默截断列表
         """
+        kind = "粉丝" if is_listen else "关注"
         # 粉丝 API (is_listen=1) 在大 V 账号上经常超时，减少重试次数
         max_attempts = 1 if is_listen else MAX_RETRIES
+        last_error = "未知错误"
         for attempt in range(max_attempts):
             try:
                 self._rate_limit()
@@ -940,19 +946,19 @@ class QQMusicAdapter(BasePlatformAdapter):
                     data = self._parse_jsonp_loose(resp.text)
                     if data and data.get("code") == 0:
                         return data
-                    if data and data.get("code") == 1101:
-                        # 参数错误（可能是 encrypt_uin 无法查询）
-                        return None
-                elif resp.status_code == 500 and is_listen:
-                    # 粉丝 API 服务端错误，无需重试
-                    return None
+                    raise RuntimeError(
+                        f"[QQ音乐] {kind}列表接口错误 code={(data or {}).get('code')}"
+                        f"（{uin} 可能是加密 uin，无法查询列表）"
+                    )
+                last_error = f"HTTP {resp.status_code}"
                 if attempt < max_attempts - 1:
                     time.sleep(1)
             except requests.RequestException as e:
-                print(f"[QQ音乐] 关注/粉丝请求异常: {e}")
+                last_error = str(e)
+                print(f"[QQ音乐] {kind}列表请求异常: {e}")
                 if attempt < max_attempts - 1:
                     time.sleep(1)
-        return None
+        raise RuntimeError(f"[QQ音乐] {kind}列表请求失败: {last_error}")
 
     def _resolve_real_uin(self, uid: str) -> Optional[str]:
         """
@@ -1045,9 +1051,10 @@ class QQMusicAdapter(BasePlatformAdapter):
             if isinstance(relation, (int, float)):
                 return {"follow": int(relation), "fans": 0}
             return None
-        except Exception as e:
-            print(f"[QQ音乐] fcg 获取关注数失败 ({uid}): {e}")
-            return None
+        except RuntimeError:
+            raise
+        except (ValueError, AttributeError, TypeError) as e:
+            raise RuntimeError(f"[QQ音乐] fcg 关注统计解析失败 ({uid}): {e}") from e
 
     def _try_get_ssr_count(self, uid: str, field: str) -> Optional[int]:
         """
@@ -1075,9 +1082,10 @@ class QQMusicAdapter(BasePlatformAdapter):
             v = info.get(field, {})
             if isinstance(v, dict):
                 return v.get("Num")
-        except Exception:
-            pass
-        return None
+        except RuntimeError:
+            raise
+        except (ValueError, AttributeError, TypeError) as e:
+            raise RuntimeError(f"[QQ音乐] SSR 统计解析失败 ({uid}, {field}): {e}") from e
 
     def refresh_user_info(self, uid: str) -> Optional[dict]:
         """重新拉取用户最新粉丝数（图谱"重新标记"用）；fcg 接口对 encrypt_uin 也可用，无认证标记"""
@@ -1106,14 +1114,17 @@ class QQMusicAdapter(BasePlatformAdapter):
             if uid.isdigit():
                 real_uin = uid
             else:
-                # encrypt_uin: 无法获取详细列表，返回空（关注数已存于 profile）
-                fcg_stats = self._try_get_follow_count_via_fcg(uid)
-                if fcg_stats and fcg_stats.get("follow", 0) > 0:
-                    print(f"[QQ音乐] 关注列表: {uid} 是加密用户，关注数 {fcg_stats['follow']}")
-                else:
-                    ssr_count = self._try_get_ssr_count(uid, "FollowNum")
-                    if ssr_count is not None and ssr_count > 0:
-                        print(f"[QQ音乐] SSR 关注数: {ssr_count}")
+                # encrypt_uin: 平台限制无法查询列表（总数已存于 profile），返回空
+                try:
+                    fcg_stats = self._try_get_follow_count_via_fcg(uid)
+                    if fcg_stats and fcg_stats.get("follow", 0) > 0:
+                        print(f"[QQ音乐] 关注列表: {uid} 是加密用户，关注数 {fcg_stats['follow']}")
+                    else:
+                        ssr_count = self._try_get_ssr_count(uid, "FollowNum")
+                        if ssr_count is not None and ssr_count > 0:
+                            print(f"[QQ音乐] SSR 关注数: {ssr_count}")
+                except RuntimeError as e:
+                    print(f"[QQ音乐] 加密用户统计获取失败: {e}")
                 return [], False, -1
 
         # 分页获取所有关注（start 从 skip 开始，支持增量续拉）
@@ -1124,9 +1135,6 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         while len(all_items) < limit:
             data = self._fetch_follow_list(real_uin, start, page_size, is_listen=0)
-            if not data:
-                break
-
             total = data.get("total", 0)
             items = data.get("list", [])
             if not items:
@@ -1179,9 +1187,6 @@ class QQMusicAdapter(BasePlatformAdapter):
 
         while len(all_items) < limit:
             data = self._fetch_follow_list(real_uin, start, page_size, is_listen=1)
-            if not data:
-                break
-
             total = data.get("total", 0)
             items = data.get("list", [])
             if not items:

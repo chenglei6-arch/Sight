@@ -829,7 +829,7 @@ def platform_all(platform):
         result = {"platform": platform, "uid": uid}
         errors = []  # 收集各子模块错误，但不中断整体返回
 
-        # 用户资料：30 分钟内的快照直接用；过期/缺失实时拉取，实时失败回退旧快照
+        # 用户资料：30 分钟内的快照直接用；过期/缺失实时拉取，失败计入 errors
         result["profile"] = None
         try:
             real_snaps = [
@@ -854,13 +854,10 @@ def platform_all(platform):
                     profile_dict = _dataclass_to_dict(profile)
                     result["profile"] = profile_dict
                     get_store().save_snapshot(platform, uid, "profile", profile_dict)
-                elif real_snaps:
-                    result["profile"] = real_snaps[0]
-                    errors.append("profile: 实时拉取失败，已回退到历史快照")
         except Exception as e:
             errors.append(f"profile: {e}")
 
-        # 内容列表：30 分钟内的快照直接用；过期/缺失实时拉取 + 写入快照，失败回退旧快照
+        # 内容列表：30 分钟内的快照直接用；过期/缺失实时拉取 + 写入快照，失败计入 errors
         result["playlists"] = []
         try:
             real_pl = [
@@ -890,10 +887,6 @@ def platform_all(platform):
                         "count": len(item_dicts), "items": item_dicts,
                     })
                     print(f"[{platform}] /all playlists 实时拉取并保存: {len(item_dicts)} 项")
-                elif real_pl and real_pl[0].get("items"):
-                    result["playlists"] = real_pl[0]["items"]
-                    errors.append("playlists: 实时拉取为空，已回退到历史快照")
-                    print(f"[{platform}] /all playlists 实时拉取为空，回退快照: {len(result['playlists'])} 项")
                 else:
                     print(f"[{platform}] /all playlists 实时拉取为空")
         except Exception as e:
@@ -946,10 +939,6 @@ def platform_all(platform):
                         "count": len(event_dicts), "items": event_dicts,
                     })
                     print(f"[{platform}] /all events 实时拉取并保存: {len(event_dicts)} 条")
-                elif real_ev and real_ev[0].get("items"):
-                    result["events"] = real_ev[0]["items"]
-                    errors.append("events: 实时拉取为空，已回退到历史快照")
-                    print(f"[{platform}] /all events 实时拉取为空，回退快照: {len(result['events'])} 条")
                 else:
                     print(f"[{platform}] /all events 实时拉取为空")
         except Exception as e:

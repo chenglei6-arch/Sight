@@ -87,7 +87,8 @@ class WeiboAdapter(BasePlatformAdapter):
         self._last_request_at = time.time()
 
     def _mobile_get(self, params: dict) -> dict:
-        """调用移动端 API"""
+        """调用移动端 API；登录失效/接口错误/重试耗尽时抛 RuntimeError，不返回空值伪装成功"""
+        last_error = "未知错误"
         for attempt in range(MAX_RETRIES):
             try:
                 self._rate_limit()
@@ -104,25 +105,26 @@ class WeiboAdapter(BasePlatformAdapter):
                         return data.get("data", {})
                     # ok=-100 且带 passport 链接 = 被重定向到登录页，登录态失效
                     if data.get("ok") == -100 or data.get("url"):
-                        self.last_api_error = "登录态已失效，请更新 Cookie"
-                        print(f"[微博] 登录态失效，API 重定向到 passport，params={params}")
-                        return {}
+                        raise RuntimeError("[微博] 登录态已失效，请更新 Cookie")
                     # ok=0 通常表示登录态失效或参数错误
                     msg = data.get("msg", "")
-                    self.last_api_error = msg or f"接口返回异常 (ok={data.get('ok')})"
-                    print(f"[微博] API 返回异常: {self.last_api_error}, params={params}")
-                    return {}
+                    raise RuntimeError(f"[微博] 接口返回异常: {msg or 'ok=%s' % data.get('ok')}")
                 else:
+                    last_error = f"HTTP {resp.status_code}"
                     print(f"[微博] HTTP {resp.status_code} (attempt {attempt+1}), params={params}")
                     if attempt < MAX_RETRIES - 1:
                         time.sleep(1.5 + attempt * 0.5)
 
+            except RuntimeError:
+                raise
             except (requests.RequestException, ValueError, json.JSONDecodeError) as e:
+                last_error = str(e)
                 print(f"[微博] 请求失败 (attempt {attempt+1}): {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1.5 + attempt)
 
-        return {}
+        self.last_api_error = last_error
+        raise RuntimeError(f"[微博] 请求失败: {last_error}")
 
     def _web_get(self, url: str, params: dict = None, headers: dict = None) -> Optional[str]:
         """获取网页内容（SSR 兜底）"""
@@ -268,25 +270,12 @@ class WeiboAdapter(BasePlatformAdapter):
     # ==================== 用户资料 ====================
 
     def get_profile(self, uid: str) -> Optional[PlatformProfile]:
-        """获取用户资料"""
+        """获取用户资料（移动端 API；接口错误上抛，用户不存在返回 None）"""
         uid = str(uid).strip()
         if not uid:
             return None
 
-        # 策略 1: 移动端 API
-        profile = self._get_profile_via_mobile(uid)
-        if profile:
-            return profile
-
-        # 策略 2: PC 端 SSR 兜底
-        return self._get_profile_via_ssr(uid)
-
-    def _get_profile_via_mobile(self, uid: str) -> Optional[PlatformProfile]:
-        """通过移动端 API 获取用户资料"""
         data = self._mobile_get({"type": "uid", "value": uid})
-        if not data:
-            return None
-
         user_info = data.get("userInfo", {})
         if not user_info:
             return None
@@ -331,73 +320,6 @@ class WeiboAdapter(BasePlatformAdapter):
                 "containerid": data.get("tabsInfo", {}).get("containerid", ""),
             },
         )
-
-    def _get_profile_via_ssr(self, uid: str) -> Optional[PlatformProfile]:
-        """通过网页 SSR 兜底获取用户资料"""
-        html = self._web_get(f"{self.WEB_BASE}/u/{uid}")
-        if not html:
-            return None
-
-        try:
-            # 从页面中提取 JSON 数据（微博在 window.$WB 或 script 中嵌入数据）
-            json_match = re.search(r'window\.\$WB\s*=\s*(\{[^;]+\});', html)
-            if not json_match:
-                json_match = re.search(
-                    r'<script>window\.__INITIAL_STATE__\s*=\s*({.*?});</script>',
-                    html,
-                )
-
-            if json_match:
-                state = json.loads(json_match.group(1))
-                # 尝试从不同路径提取用户信息
-                user_data = (
-                    state.get("userInfo", {})
-                    or state.get("users", {})
-                )
-                if not user_data:
-                    return None
-
-                # 如果 users 是 dict，提取第一个
-                if isinstance(user_data, dict) and "id" not in user_data:
-                    for k, v in user_data.items():
-                        if isinstance(v, dict) and v.get("id"):
-                            user_data = v
-                            break
-
-                if not user_data or not user_data.get("id"):
-                    return None
-
-                gender = 0
-                if user_data.get("gender") == "m":
-                    gender = 1
-                elif user_data.get("gender") == "f":
-                    gender = 2
-
-                return PlatformProfile(
-                    platform="weibo",
-                    uid=str(user_data.get("id", uid)),
-                    nickname=user_data.get("screen_name", ""),
-                    avatar_url=user_data.get("avatar_hd", "") or user_data.get("profile_image_url", ""),
-                    background_url=user_data.get("cover_image", ""),
-                    signature=user_data.get("description", ""),
-                    gender=gender,
-                    birthday="",
-                    location=user_data.get("location", ""),
-                    join_time="",
-                    level=0,
-                    is_vip=user_data.get("verified", False),
-                    vip_label=user_data.get("verified_reason", ""),
-                    extra={
-                        "follow_count": user_data.get("friends_count", 0),
-                        "fans_count": user_data.get("followers_count", 0),
-                        "weibo_count": user_data.get("statuses_count", 0),
-                    },
-                )
-
-        except (json.JSONDecodeError, AttributeError, KeyError) as e:
-            print(f"[微博] SSR 解析失败: {e}")
-
-        return None
 
     # ==================== 内容列表（微博列表） ====================
 
@@ -603,6 +525,7 @@ class WeiboAdapter(BasePlatformAdapter):
         Cookie 做 wapsso 跨域校验会被拦（ok=-100 跳 passport），PC ajax 无此问题。
         """
         headers = {"Referer": "https://weibo.com/", "X-Requested-With": "XMLHttpRequest"}
+        last_error = "未知错误"
         for attempt in range(MAX_RETRIES):
             try:
                 self._rate_limit()
@@ -617,24 +540,26 @@ class WeiboAdapter(BasePlatformAdapter):
                         data = resp.json()
                     except ValueError:
                         # 非 JSON（多为 302 跟到 passport 登录页的 HTML）
-                        self.last_api_error = "登录态已失效，请更新 Cookie"
-                        print(f"[微博] PC 接口返回非 JSON（疑似登录页），path={path}")
-                        return {}
+                        raise RuntimeError("[微博] 登录态已失效，请更新 Cookie（PC 接口返回非 JSON）")
                     if isinstance(data, dict) and data.get("ok") == 1:
                         self.last_api_error = None
                         return data
                     msg = (data or {}).get("message") or ""
                     self.last_api_error = msg or f"接口返回异常 (ok={(data or {}).get('ok')})"
                     print(f"[微博] PC 接口返回异常: {self.last_api_error}, path={path}")
-                    return {}
+                    raise RuntimeError(f"[微博] {self.last_api_error}")
+                last_error = f"HTTP {resp.status_code}"
                 print(f"[微博] HTTP {resp.status_code} (attempt {attempt+1}), path={path}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1.5 + attempt * 0.5)
+            except RuntimeError:
+                raise
             except (requests.RequestException, ValueError) as e:
+                last_error = str(e)
                 print(f"[微博] 请求失败 (attempt {attempt+1}): {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1.5 + attempt)
-        return {}
+        raise RuntimeError(f"[微博] 请求失败: {last_error}")
 
     def _social_page(
         self, uid: str, relate: str, limit: int, skip: int

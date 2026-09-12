@@ -311,9 +311,10 @@ class DouyinAdapter(BasePlatformAdapter):
                 raw_user = user_data.get("user", {})
 
             return self._build_profile(raw_user, user_info["uid"])
-        except Exception as e:
-            print(f"[抖音] get_profile 失败: {e}")
-            return None
+        except RuntimeError:
+            raise
+        except (requests.RequestException, ValueError, KeyError, AttributeError) as e:
+            raise RuntimeError(f"[抖音] 获取资料失败 ({uid}): {e}") from e
 
     def _build_profile(self, user: dict, uid: str) -> PlatformProfile:
         """从用户数据构建 PlatformProfile"""
@@ -390,9 +391,10 @@ class DouyinAdapter(BasePlatformAdapter):
                     seen_ids.add(item.item_id)
                     items.append(item)
             return items
-        except Exception as e:
-            print(f"[抖音] get_content_lists 失败: {e}")
-            return []
+        except RuntimeError:
+            raise
+        except (requests.RequestException, ValueError, KeyError, AttributeError) as e:
+            raise RuntimeError(f"[抖音] 获取作品列表失败: {e}") from e
 
     def _build_content_item(self, aweme: dict) -> Optional[ContentItem]:
         """从作品 JSON 构建 ContentItem"""
@@ -451,9 +453,10 @@ class DouyinAdapter(BasePlatformAdapter):
                 "subscribedCount": stats.get("collect_count", 0),
                 "items": [],
             }
-        except Exception as e:
-            print(f"[抖音] get_content_detail 失败: {e}")
-            return None
+        except RuntimeError:
+            raise
+        except (requests.RequestException, ValueError, KeyError, AttributeError) as e:
+            raise RuntimeError(f"[抖音] 获取作品详情失败 ({item_id}): {e}") from e
 
     # ==================== 关注/粉丝 ====================
 
@@ -573,9 +576,10 @@ class DouyinAdapter(BasePlatformAdapter):
                 "fans": user.get("follower_count") or 0,
                 "is_verified": _douyin_verified(user),
             }
-        except Exception as e:
-            print(f"[抖音] refresh_user_info({uid}) 失败: {e}")
-            return None
+        except RuntimeError:
+            raise
+        except (requests.RequestException, ValueError, KeyError, AttributeError) as e:
+            raise RuntimeError(f"[抖音] refresh_user_info({uid}) 失败: {e}") from e
 
     # ==================== Events ====================
 

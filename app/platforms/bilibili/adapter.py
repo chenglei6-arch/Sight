@@ -82,7 +82,8 @@ class BilibiliAdapter(BasePlatformAdapter):
         self._last_request_at = time.time()
 
     def _get(self, endpoint: str, params: dict = None) -> dict:
-        """带重试的 GET 请求（防御空响应/非字典/HTTP错误）"""
+        """带重试的 GET 请求；重试耗尽或业务错误时抛 RuntimeError，不返回空值伪装成功"""
+        last_error = "未知错误"
         for attempt in range(MAX_RETRIES):
             try:
                 self._rate_limit()
@@ -97,11 +98,13 @@ class BilibiliAdapter(BasePlatformAdapter):
                     self._consecutive_rate_limits += 1
                     wait_time = min(5 + (self._consecutive_rate_limits * 2), 25)
                     print(f"[B站] HTTP {resp.status_code}，等待 {wait_time}s 重试... endpoint={endpoint}")
+                    last_error = f"HTTP {resp.status_code}（风控拦截）"
                     time.sleep(wait_time)
                     continue
 
                 if resp.status_code != 200:
                     print(f"[B站] HTTP {resp.status_code}，等待重试... endpoint={endpoint}")
+                    last_error = f"HTTP {resp.status_code}"
                     if attempt < MAX_RETRIES - 1:
                         time.sleep(1.5 + attempt)
                     continue
@@ -110,10 +113,11 @@ class BilibiliAdapter(BasePlatformAdapter):
                 raw_text = resp.text.strip() if resp.text else ""
                 if not raw_text or raw_text == "null":
                     self._consecutive_rate_limits += 1
+                    last_error = "空响应（疑似反爬虫拦截）"
                     if attempt >= 1:
                         # 已重试过一次仍为空，疑似反爬虫，快速放弃
                         print(f"[B站] 空响应持续，疑似反爬虫拦截，放弃 endpoint={endpoint}")
-                        return {}
+                        break
                     print(f"[B站] 空响应 (attempt {attempt+1})，短暂等待后重试... endpoint={endpoint}")
                     time.sleep(min(2 + self._consecutive_rate_limits * 1.5, 10))
                     continue
@@ -121,9 +125,10 @@ class BilibiliAdapter(BasePlatformAdapter):
                 data = resp.json()
                 # 防御：json() 可能返回 None（body 为 "null"）
                 if data is None or not isinstance(data, dict):
+                    last_error = f"非字典响应 type={type(data).__name__}"
                     if attempt >= 1:
                         print(f"[B站] 非字典响应持续 type={type(data).__name__}，放弃 endpoint={endpoint}")
-                        return {}
+                        break
                     print(f"[B站] 非字典响应 type={type(data).__name__} (attempt {attempt+1})，等待重试... endpoint={endpoint}")
                     time.sleep(1.5)
                     continue
@@ -134,6 +139,9 @@ class BilibiliAdapter(BasePlatformAdapter):
                     self.last_api_error = None
                     return data.get("data", {})
 
+                msg = data.get("message") or data.get("msg") or "未知错误"
+                last_error = f"{msg}(code={code})"
+
                 if code == -799:
                     self._consecutive_rate_limits += 1
                     wait_time = min(3 + (self._consecutive_rate_limits * 2), 20)
@@ -141,21 +149,19 @@ class BilibiliAdapter(BasePlatformAdapter):
                     time.sleep(wait_time)
                     continue
 
-                if code in (-404,):
-                    return {}
-
-                print(f"[B站] API 返回异常: code={code}, msg={data.get('message', '')}, endpoint={endpoint}")
-                self.last_api_error = f"{data.get('message') or data.get('msg') or '未知错误'}(code={code})"
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(1.5)
-                return data.get("data", {})
+                print(f"[B站] API 返回异常: code={code}, msg={msg}, endpoint={endpoint}")
+                self.last_api_error = last_error
+                # 业务错误（目标不存在/未登录/权限不足等）重试无意义，直接上抛
+                raise RuntimeError(f"[B站] {last_error}, endpoint={endpoint}")
 
             except (requests.RequestException, ValueError, AttributeError) as e:
+                last_error = str(e)
                 print(f"[B站] 请求失败 (attempt {attempt+1}): {e}")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1.5 + attempt)
 
-        return {}
+        self.last_api_error = last_error
+        raise RuntimeError(f"[B站] 请求失败: {last_error}, endpoint={endpoint}")
 
     # ==================== 状态检查 ====================
 

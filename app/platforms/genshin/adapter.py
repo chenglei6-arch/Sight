@@ -131,37 +131,40 @@ class GenshinAdapter(BasePlatformAdapter):
         if self._my_game_uid:
             return {"uid": self._my_game_uid}
 
-        try:
-            self._rate_limit(1.0)
-            resp = sess.get(
-                f"{self.TAKUMI_BINDING}/getUserGameRolesByCookie",
-                params={},
-                timeout=15,
+        self._rate_limit(1.0)
+        resp = sess.get(
+            f"{self.TAKUMI_BINDING}/getUserGameRolesByCookie",
+            params={},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"[原神] 米游社绑定接口 HTTP {resp.status_code}")
+        data = resp.json()
+        if data.get("retcode") != 0:
+            raise RuntimeError(
+                f"[原神] 米游社绑定接口错误 retcode={data.get('retcode')}: {data.get('message', '')}"
+                "（Cookie 可能已失效）"
             )
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if data.get("retcode") != 0:
-                return None
-            roles = data.get("data", {}).get("list", [])
-            # 找原神 (hk4e_cn) 账号
-            for role in roles:
-                if role.get("game_biz") in ("hk4e_cn", "hk4e_global"):
-                    self._my_game_uid = str(role.get("game_uid", ""))
-                    return {
-                        "uid": self._my_game_uid,
-                        "nickname": role.get("nickname", ""),
-                        "level": role.get("level", 0),
-                        "region": role.get("region", ""),
-                        "server": GENSHIN_SERVERS.get(role.get("region", ""), role.get("region", "")),
-                    }
-        except Exception:
-            return None
+        roles = data.get("data", {}).get("list", [])
+        # 找原神 (hk4e_cn) 账号
+        for role in roles:
+            if role.get("game_biz") in ("hk4e_cn", "hk4e_global"):
+                self._my_game_uid = str(role.get("game_uid", ""))
+                return {
+                    "uid": self._my_game_uid,
+                    "nickname": role.get("nickname", ""),
+                    "level": role.get("level", 0),
+                    "region": role.get("region", ""),
+                    "server": GENSHIN_SERVERS.get(role.get("region", ""), role.get("region", "")),
+                }
+        return None
 
     # ── Enka API ──
 
     def _enka_get(self, uid: str) -> dict:
+        """查询 Enka；404（无此用户）返回 {}，维护/网络错误上抛"""
         uid = str(uid).strip()
+        last_error = "未知错误"
         for attempt in range(min(MAX_RETRIES, 2)):
             try:
                 self._rate_limit(0.5)
@@ -169,22 +172,23 @@ class GenshinAdapter(BasePlatformAdapter):
                     f"{self.ENKA_API}/{uid}",
                     timeout=(10, 15),
                 )
-                if resp.status_code == 424:
-                    print(f"[原神] Enka 维护 (424) uid={uid}")
-                    return {}
                 if resp.status_code == 404:
                     print(f"[原神] Enka 无此用户 (404) uid={uid}")
                     return {}
+                if resp.status_code == 424:
+                    raise RuntimeError(f"[原神] Enka 维护中 (424) uid={uid}，请稍后重试")
                 if resp.status_code != 200:
+                    last_error = f"HTTP {resp.status_code}"
                     if attempt < MAX_RETRIES - 1:
                         time.sleep(2 + attempt)
                     continue
                 data = resp.json()
                 return data if isinstance(data, dict) else {}
             except (requests.RequestException, ValueError) as e:
+                last_error = str(e)
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(2 + attempt)
-        return {}
+        raise RuntimeError(f"[原神] Enka 查询失败 uid={uid}: {last_error}")
 
     # ── 状态检查 ──
 
@@ -236,7 +240,8 @@ class GenshinAdapter(BasePlatformAdapter):
                     "signature": profile.signature,
                     "level": profile.level,
                 }]
-        return []
+            return []
+        raise RuntimeError("原神仅支持数字 UID 搜索（米游社不开放昵称搜索）")
 
     # ── 资料 ──
 

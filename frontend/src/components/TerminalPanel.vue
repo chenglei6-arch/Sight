@@ -159,14 +159,17 @@ function clearLogs() {
   unread.value = 0
 }
 
+const copyError = ref('')
 async function copyLogs() {
   const text = filteredEntries.value.map((e) => `[${e.ts}] ${e.text}`).join('\n')
   try {
     await navigator.clipboard.writeText(text)
     copied.value = true
+    copyError.value = ''
     setTimeout(() => (copied.value = false), 1200)
-  } catch {
-    /* 剪贴板不可用（非安全上下文） */
+  } catch (e) {
+    copyError.value = '复制失败：' + e.message
+    setTimeout(() => (copyError.value = ''), 2500)
   }
 }
 
@@ -174,13 +177,15 @@ async function copyLogs() {
 const summary = computed(() => queueSummary())
 const resuming = ref('')
 
+const resumeError = ref('')
 async function resumeQueue(platform) {
   resuming.value = platform
   try {
     await api.post('/graph/expand/resume', platform ? { platform } : {})
     await refreshQueues()
-  } catch {
-    /* 状态下次轮询会刷新 */
+    resumeError.value = ''
+  } catch (e) {
+    resumeError.value = '恢复失败：' + e.message
   } finally {
     resuming.value = ''
   }
@@ -194,7 +199,7 @@ function queueState(q) {
 }
 
 function showQueueLogs() {
-  // 跳到日志页签并用平台过滤
+  // 跳到日志页签并清空平台过滤，便于查看全部队列日志
   setTerminalTab('logs')
   filter.value = ''
 }
@@ -261,12 +266,13 @@ watch(
           <button class="t-btn" title="清屏（仅本地显示）" @click="clearLogs()">
             <Icon name="trash" :size="13" />
           </button>
-          <button class="t-btn" :title="copied ? '已复制' : '复制当前显示的日志'" @click="copyLogs()">
+          <button class="t-btn" :title="copyError || (copied ? '已复制' : '复制当前显示的日志')" @click="copyLogs()">
             <Icon :name="copied ? 'check' : 'edit'" :size="13" />
           </button>
         </div>
 
         <div ref="logBox" class="log-box" @scroll="onScroll">
+          <div v-if="copyError" class="log-line lv-error"><span class="log-text">{{ copyError }}</span></div>
           <div v-if="!filteredEntries.length" class="log-empty">
             {{ filter ? '没有匹配的日志' : '暂无日志，触发一次数据刷新试试' }}
           </div>
@@ -309,6 +315,7 @@ watch(
             全部恢复
           </button>
         </div>
+        <div v-if="resumeError" class="log-line lv-error"><span class="log-text">{{ resumeError }}</span></div>
 
         <div class="queue-list">
           <div v-for="q in state.queues" :key="q.platform" class="queue-row">
