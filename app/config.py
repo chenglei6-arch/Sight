@@ -16,5 +16,5 @@ MAX_RETRIES = 3           # 失败重试次数
 
 # ==================== 服务器 ====================
 FLASK_HOST = "127.0.0.1"
-FLASK_PORT = 5000
+FLASK_PORT = 5001
 FLASK_DEBUG = True
