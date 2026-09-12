@@ -31,7 +31,7 @@ from ref_xhs_pc.state import (
     cookie_header,
     initial_pc_cookies,
 )
-from xhs_utils.common_util import generate_a1, generate_web_id
+from ref_utils.common_util import generate_a1, generate_web_id
 
 
 _GETDSS_RE = re.compile(r"function\s+getdss\s*\(\s*\)\s*\{\s*return\s+'(\d+)'")

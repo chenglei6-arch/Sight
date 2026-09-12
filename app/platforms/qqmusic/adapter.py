@@ -21,7 +21,6 @@ API 说明:
   - encrypt_uin 无法解密（QQ音乐服务端加密）
   - fcg_get_profile_homepage.fcg 可查 encrypt_uin 用户的资料和关注数
 """
-import base64
 import json
 import os
 import random
@@ -37,10 +36,8 @@ from app.platforms.base import (
     BasePlatformAdapter,
     PlatformProfile,
     ContentItem,
-    MediaEntry,
     EventItem,
 )
-from app.credentials import CredentialManager
 from app.config import REQUEST_TIMEOUT, MAX_RETRIES
 
 
@@ -827,16 +824,6 @@ class QQMusicAdapter(BasePlatformAdapter):
             "subscribedCount": data.get("subscriber_count", data.get("favor_count", 0)),
             "items": items,
         }
-
-    # ==================== 收听历史 (排行) ====================
-
-    def get_history(self, uid: str, period: str = "all") -> list[MediaEntry]:
-        """
-        获取用户的听歌排行
-
-        QQ 音乐无公开的听歌排行 API，返回空。
-        """
-        return []
 
     # ==================== 动态 ====================
 

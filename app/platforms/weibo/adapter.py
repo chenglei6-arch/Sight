@@ -31,7 +31,6 @@ from app.platforms.base import (
     ContentItem,
     EventItem,
 )
-from app.credentials import CredentialManager
 from app.config import REQUEST_TIMEOUT, MAX_RETRIES
 
 
@@ -43,7 +42,6 @@ class WeiboAdapter(BasePlatformAdapter):
 
     # API 基础地址
     MOBILE_API = "https://m.weibo.cn/api/container/getIndex"
-    MOBILE_BASE = "https://m.weibo.cn"
     WEB_BASE = "https://weibo.com"
     SEARCH_BASE = "https://s.weibo.com"
 
@@ -156,10 +154,9 @@ class WeiboAdapter(BasePlatformAdapter):
         if not cookies:
             return False
         try:
-            # 尝试访问移动端 API 获取用户信息
+            # 移动端配置接口可达且未报登录失效，才视为凭证有效
             data = self._mobile_get({"type": "uid", "value": "0"})
-            # 即使 ok=1 也说明 API 可达，不一定需要获取到数据
-            return True
+            return bool(data)
         except Exception:
             return False
 

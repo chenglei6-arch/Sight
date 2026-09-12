@@ -1,13 +1,11 @@
 """
-抖音平台适配器 — 基于 cv-cat/DouYin_Spider 的 DouyinAPI 纯 API 实现
+抖音平台适配器 — 基于 chenglei6-arch/DouYin_Spider（cv-cat/DouYin_Spider 的 fork）的纯 API 实现
 
-参考项目: https://github.com/cv-cat/DouYin_Spider
-参考文档: reference/DouYin_Spider-master/README.md
-使用模式: reference/DouYin_Spider-master/main.py
+上游与同步约定见 docs/UPSTREAM_SYNC.md（含 following 列表 max_time 修复说明）。
 
 架构说明:
-  - 本适配器直接复用 reference 的 DouyinAPI 静态方法，不做 SSR 兜底
-  - ref_builder/*, ref_dy_apis/*, ref_utils/* 是 DouYin_Spider 的移植模块
+  - 本适配器直接复用上游的 DouyinAPI 静态方法，不做 SSR 兜底
+  - ref_builder/*, ref_dy_apis/*, ref_utils/* 是上游的移植模块
   - adapter.py 将这些基础 API 封装为 BasePlatformAdapter 的统一接口
 
 用法:
@@ -15,8 +13,6 @@
     adapter = DouyinAdapter()
     profile = adapter.get_profile("sec_uid_or_uid")
     works = adapter.get_content_lists("sec_uid")
-    videos = adapter.search_content("关键词")
-    comments = adapter.get_all_comments("aweme_id")
 
 数据流:
     DouyinAPI (ref_dy_apis/douyin_api.py)
@@ -25,7 +21,6 @@
       → BasePlatformAdapter 接口（app/platforms/base.py）
 """
 import json
-import os
 import random
 import re
 import threading
@@ -45,7 +40,6 @@ from app.platforms.base import (
 )
 from app.platforms.douyin.ref_builder.auth import DouyinAuth
 from app.platforms.douyin.ref_dy_apis.douyin_api import DouyinAPI
-from app.credentials import CredentialManager
 from app.config import REQUEST_TIMEOUT, MAX_RETRIES
 
 
@@ -92,13 +86,9 @@ class DouyinAdapter(BasePlatformAdapter):
     def _load_cookie_str(self) -> str:
         """加载抖音 Cookie 字符串
 
-        优先级（用户更新 Cookie 请修改 credentials/douyin_cookie.txt）：
-          1. credentials/douyin_cookie.txt — 用户自行维护的 Cookie 文件
-          2. 项目根目录 .env 中的 DY_COOKIES
-          3. reference/DouYin_Spider-master/.env 中的 DY_COOKIES（参考项目）
+        用户更新 Cookie 请修改 credentials/douyin_cookie.txt；
+        附加账号（多账号池）直接加载自己绑定的 Cookie。
         """
-        # 1. credentials/douyin_cookie.txt — 最高优先级，用户手动维护（主账号）
-        #    附加账号（多账号池）直接加载自己绑定的 Cookie
         cookies = self._load_cookies()
         if cookies:
             cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
@@ -108,41 +98,8 @@ class DouyinAdapter(BasePlatformAdapter):
                   + (f", session={sid[:10]}..." if sid else ""))
             return cookie_str
 
-        # 2. 项目根目录 .env
-        root_env = Path(__file__).parent.parent.parent.parent / ".env"
-        if root_env.exists():
-            load_dotenv(dotenv_path=root_env, override=True)
-            dy_cookies = os.environ.get("DY_COOKIES", "")
-            if dy_cookies:
-                return self._parse_dy_cookie_env(dy_cookies, "根目录 .env")
-
-        # 3. 参考项目的 .env
-        ref_env = Path(__file__).parent.parent.parent.parent / "reference" / "DouYin_Spider-master" / ".env"
-        if ref_env.exists():
-            load_dotenv(dotenv_path=ref_env, override=True)
-            dy_cookies = os.environ.get("DY_COOKIES", "")
-            if dy_cookies:
-                return self._parse_dy_cookie_env(dy_cookies, "参考项目 .env")
-
         print(f"[抖音] 警告: 未找到任何 Cookie 来源")
         return ""
-
-    def _parse_dy_cookie_env(self, raw: str, source: str) -> str:
-        """解析 .env 中的 DY_COOKIES 值"""
-        raw = raw.strip().strip("'").strip('"')
-        cookies = {}
-        for item in raw.split("; "):
-            if "=" in item:
-                key, value = item.split("=", 1)
-                cookies[key.strip()] = value.strip()
-        if cookies.get("sessionid"):
-            cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-            print(f"[抖音] 从 {source} 加载: {len(cookies)} 个字段, session={cookies.get('sessionid','')[:10]}...")
-            return cookie_str
-        else:
-            # 没有 sessionid 也返回，可能有部分可用
-            print(f"[抖音] 从 {source} 加载: {len(cookies)} 个字段, 无sessionid")
-            return "; ".join([f"{k}={v}" for k, v in cookies.items()])
 
     @property
     def auth(self) -> DouyinAuth:
@@ -498,176 +455,6 @@ class DouyinAdapter(BasePlatformAdapter):
             print(f"[抖音] get_content_detail 失败: {e}")
             return None
 
-    # ==================== 内容搜索 ====================
-
-    def search_content(self, keyword: str, limit: int = 25, sort_type: str = "0",
-                       publish_time: str = "0", offset: str = "0",
-                       filter_duration: str = "", search_range: str = "",
-                       content_type: str = "") -> list[dict]:
-        """
-        综合搜索作品 — 参考 DouYin_Spider: DouyinAPI.search_some_general_work
-
-        注意: 抖音搜索 API 需要新鲜的 Cookie，否则会触发 verify_check 验证码。
-        """
-        try:
-            # 直接调 search_some_general_work，参考 DouYin_Spider spider_some_search_work
-            # search_some_general_work 内部已循环分页，无需额外 check 请求
-            self._rate_limit()
-            works = DouyinAPI.search_some_general_work(
-                self.auth, keyword, limit, sort_type, publish_time,
-                filter_duration, search_range, content_type
-            )
-            return [self._build_search_result(w) for w in works]
-        except Exception as e:
-            print(f"[抖音] search_content 失败: {e}")
-            return []
-
-    def search_video(self, keyword: str, limit: int = 25, offset: str = "0",
-                     sort_type: str = "0", publish_time: str = "0",
-                     filter_duration: str = "", search_range: str = "0") -> list[dict]:
-        """
-        视频搜索 — 参考 DouYin_Spider: DouyinAPI.search_some_video_work
-        """
-        try:
-            self._rate_limit()
-            works, _ = DouyinAPI.search_some_video_work(
-                self.auth, keyword, limit, sort_type, publish_time,
-                filter_duration, search_range
-            )
-            return [self._build_search_result(w) for w in works]
-        except Exception as e:
-            print(f"[抖音] search_video 失败: {e}")
-            return []
-
-    def search_live(self, keyword: str, limit: int = 25) -> list[dict]:
-        """
-        搜索直播 — 参考 DouYin_Spider: DouyinAPI.search_some_live
-        """
-        try:
-            self._rate_limit()
-            lives = DouyinAPI.search_some_live(self.auth, keyword, limit)
-            results = []
-            for live in lives:
-                author = live.get("author", {})
-                results.append({
-                    "id": live.get("id_str", ""),
-                    "title": live.get("title", ""),
-                    "cover_url": self._extract_avatar_url(live),
-                    "nickname": author.get("nickname", ""),
-                    "user_count": live.get("user_count_str", "0"),
-                    "status": live.get("status", 0),
-                })
-            return results
-        except Exception as e:
-            print(f"[抖音] search_live 失败: {e}")
-            return []
-
-    def _build_search_result(self, item: dict) -> dict:
-        """统一搜索结果构建"""
-        aweme = item.get("aweme_info", {})
-        if not aweme:
-            return item
-        video = aweme.get("video", {})
-        cover = video.get("cover", {}) or {}
-        cover_urls = cover.get("url_list", []) if isinstance(cover, dict) else []
-        stats = aweme.get("statistics", {})
-        author = aweme.get("author", {})
-        return {
-            "aweme_id": str(aweme.get("aweme_id", "")),
-            "desc": (aweme.get("desc") or "")[:200],
-            "create_time": str(aweme.get("create_time", "")),
-            "cover_url": cover_urls[0] if cover_urls else "",
-            "duration": video.get("duration", 0),
-            "play_count": stats.get("play_count", 0),
-            "digg_count": stats.get("digg_count", 0),
-            "comment_count": stats.get("comment_count", 0),
-            "share_count": stats.get("share_count", 0),
-            "author": {
-                "uid": str(author.get("uid", "")),
-                "nickname": author.get("nickname", ""),
-                "sec_uid": author.get("sec_uid", ""),
-                "avatar_url": self._extract_avatar_url(author),
-            },
-        }
-
-    # ==================== 评论 ====================
-
-    def get_comments(self, item_id: str, cursor: str = "0", count: int = 20) -> dict:
-        """
-        获取评论 — 参考 DouYin_Spider: DouyinAPI.get_work_out_comment
-
-        参考 main.py:
-            res_json = DouyinAPI.get_work_out_comment(auth, url, cursor)
-        """
-        try:
-            url = f"{self.BASE_URL}/video/{item_id}"
-            self._rate_limit()
-            resp = DouyinAPI.get_work_out_comment(self.auth, url, cursor)
-            if not resp:
-                return {"comments": [], "cursor": "0", "has_more": 0}
-            comments = [self._build_comment(c) for c in resp.get("comments", [])]
-            return {
-                "comments": comments,
-                "cursor": str(resp.get("cursor", "0")),
-                "has_more": resp.get("has_more", 0),
-                "total": resp.get("total", 0),
-            }
-        except Exception as e:
-            print(f"[抖音] get_comments 失败: {e}")
-            return {"comments": [], "cursor": "0", "has_more": 0}
-
-    def get_all_comments(self, item_id: str, limit: int = 200) -> list[dict]:
-        """
-        获取全部一级评论 — 参考 DouYin_Spider: DouyinAPI.get_work_all_out_comment
-        """
-        try:
-            url = f"{self.BASE_URL}/video/{item_id}"
-            self._rate_limit()
-            comments = DouyinAPI.get_work_all_out_comment(self.auth, url)
-            return [self._build_comment(c) for c in comments[:limit]]
-        except Exception as e:
-            print(f"[抖音] get_all_comments 失败: {e}")
-            return []
-
-    def get_reply_comments(self, item_id: str, comment_id: str, cursor: str = "0",
-                           count: int = 5) -> dict:
-        """
-        获取评论的二级回复 — 参考 DouYin_Spider: DouyinAPI.get_work_inner_comment
-        """
-        try:
-            comment = {"aweme_id": item_id, "cid": comment_id}
-            self._rate_limit()
-            resp = DouyinAPI.get_work_inner_comment(self.auth, comment, cursor, str(count))
-            if not resp:
-                return {"comments": [], "cursor": "0", "has_more": 0}
-            comments = [self._build_comment(c) for c in resp.get("comments", [])]
-            return {
-                "comments": comments,
-                "cursor": str(resp.get("cursor", "0")),
-                "has_more": resp.get("has_more", 0),
-            }
-        except Exception as e:
-            print(f"[抖音] get_reply_comments 失败: {e}")
-            return {"comments": [], "cursor": "0", "has_more": 0}
-
-    def _build_comment(self, c: dict) -> dict:
-        """统一评论构建"""
-        user = c.get("user", {})
-        return {
-            "cid": str(c.get("cid", "")),
-            "text": c.get("text", "")[:500],
-            "create_time": str(c.get("create_time", 0)),
-            "digg_count": c.get("digg_count", 0),
-            "reply_comment_total": c.get("reply_comment_total", 0),
-            "user": {
-                "uid": str(user.get("uid", "")),
-                "nickname": user.get("nickname", ""),
-                "avatar_url": self._extract_avatar_url(user),
-                "sec_uid": user.get("sec_uid", ""),
-            },
-            "has_more_reply": c.get("reply_comment_total", 0) > 0,
-        }
-
     # ==================== 关注/粉丝 ====================
 
     def _social_page(
@@ -790,123 +577,6 @@ class DouyinAdapter(BasePlatformAdapter):
             print(f"[抖音] refresh_user_info({uid}) 失败: {e}")
             return None
 
-    # ==================== 推荐 Feed ====================
-
-    def get_feed(self, count: int = 20, refresh_index: str = "2") -> list[dict]:
-        """
-        获取首页推荐视频 — 参考 DouYin_Spider: DouyinAPI.get_feed
-
-        注意: 当前 feed 接口返回空内容（抖音 API 变更），暂不可用。
-        """
-        try:
-            self._rate_limit()
-            resp = DouyinAPI.get_feed(self.auth, str(count), refresh_index)
-            aweme_list = resp.get("aweme_list", [])
-            if not aweme_list:
-                print(f"[抖音] get_feed 返回空（接口可能已被抖音变更）")
-                return []
-
-            results = []
-            seen_ids = set()
-            for aweme in aweme_list:
-                aweme_id = str(aweme.get("aweme_id", ""))
-                if aweme_id and aweme_id not in seen_ids:
-                    seen_ids.add(aweme_id)
-                    video = aweme.get("video", {})
-                    cover = video.get("cover", {}) or {}
-                    cover_urls = cover.get("url_list", []) if isinstance(cover, dict) else []
-                    stats = aweme.get("statistics", {})
-                    author = aweme.get("author", {})
-                    results.append({
-                        "aweme_id": aweme_id,
-                        "desc": (aweme.get("desc") or "")[:200],
-                        "create_time": str(aweme.get("create_time", "")),
-                        "cover_url": cover_urls[0] if cover_urls else "",
-                        "duration": video.get("duration", 0),
-                        "play_count": stats.get("play_count", 0),
-                        "digg_count": stats.get("digg_count", 0),
-                        "comment_count": stats.get("comment_count", 0),
-                        "share_count": stats.get("share_count", 0),
-                        "author": {
-                            "uid": str(author.get("uid", "")),
-                            "nickname": author.get("nickname", ""),
-                            "sec_uid": author.get("sec_uid", ""),
-                            "avatar_url": self._extract_avatar_url(author),
-                        },
-                    })
-            return results[:count]
-        except requests.exceptions.JSONDecodeError:
-            print(f"[抖音] get_feed 响应为空（抖音 API 变更，接口可能已失效）")
-            return []
-        except Exception as e:
-            print(f"[抖音] get_feed 失败: {e}")
-            return []
-
-    # ==================== 互动操作 ====================
-
-    def digg_aweme(self, aweme_id: str, digg_type: str = "1") -> bool:
-        """
-        点赞/取消点赞视频 — 参考 DouYin_Spider: DouyinAPI.digg
-
-        参考 douyin_api.py:
-            DouyinAPI.digg(auth, aweme_id, digg_type)
-            digg_type: "1" 点赞, "0" 取消点赞
-        """
-        try:
-            self._rate_limit()
-            result = DouyinAPI.digg(self.auth, aweme_id, digg_type)
-            return result
-        except Exception as e:
-            print(f"[抖音] digg_aweme 失败: {e}")
-            return False
-
-    def publish_comment(self, aweme_id: str, content: str, reply_id: str = "") -> Optional[dict]:
-        """
-        发布评论 — 参考 DouYin_Spider: DouyinAPI.publish_comment
-
-        参考 douyin_api.py:
-            DouyinAPI.publish_comment(auth, aweme_id, content, reply_id)
-        """
-        try:
-            self._rate_limit()
-            result = DouyinAPI.publish_comment(self.auth, aweme_id, content, reply_id)
-            return result
-        except Exception as e:
-            print(f"[抖音] publish_comment 失败: {e}")
-            return None
-
-    def collect_aweme(self, aweme_id: str, action: str = "1") -> Optional[dict]:
-        """
-        收藏/取消收藏视频 — 参考 DouYin_Spider: DouyinAPI.collect_aweme
-
-        参考 douyin_api.py:
-            DouyinAPI.collect_aweme(auth, aweme_id, action)
-            action: "1" 收藏, "0" 取消收藏
-        """
-        try:
-            self._rate_limit()
-            result = DouyinAPI.collect_aweme(self.auth, aweme_id, action)
-            return result
-        except Exception as e:
-            print(f"[抖音] collect_aweme 失败: {e}")
-            return None
-
-    def get_notice_list(self, limit: int = 20, notice_group: str = "700") -> list[dict]:
-        """
-        获取消息通知 — 参考 DouYin_Spider: DouyinAPI.get_some_notice_list
-
-        参考 douyin_api.py:
-            DouyinAPI.get_some_notice_list(auth, num, notice_group)
-            notice_group: 700 全部消息, 401 粉丝, 601 @我的, 2 评论, 3 点赞, 520 弹幕
-        """
-        try:
-            self._rate_limit()
-            notices = DouyinAPI.get_some_notice_list(self.auth, limit, notice_group)
-            return notices
-        except Exception as e:
-            print(f"[抖音] get_notice_list 失败: {e}")
-            return []
-
     # ==================== Events ====================
 
     def get_events(self, uid: str, limit: int = 30) -> list[EventItem]:
@@ -937,7 +607,3 @@ class DouyinAdapter(BasePlatformAdapter):
                 extra=item.extra,
             ))
         return events
-
-    def get_history(self, uid: str, period: str = "all") -> list:
-        """抖音暂无听歌历史"""
-        return []

@@ -1,8 +1,8 @@
 """
 抖音平台适配器
 
-基于 cv-cat/DouYin_Spider 的 DouyinAPI 纯 API 实现。
-参考项目: https://github.com/cv-cat/DouYin_Spider
+基于 chenglei6-arch/DouYin_Spider（cv-cat/DouYin_Spider 的 fork）的纯 API 实现。
+上游与同步约定见 docs/UPSTREAM_SYNC.md。
 
 架构:
   - ref_builder/*  — 请求构建（auth、header、params、proto）
@@ -20,9 +20,6 @@
     adapter = DouyinAdapter()
     profile = adapter.get_profile("sec_uid")
     works = adapter.get_content_lists("sec_uid")
-    videos = adapter.search_content("关键词")
-    comments = adapter.get_all_comments("aweme_id")
-    feed = adapter.get_feed()
 """
 
 from app.platforms.douyin.adapter import DouyinAdapter

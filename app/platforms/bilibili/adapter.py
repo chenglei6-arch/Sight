@@ -20,7 +20,6 @@ from app.platforms.base import (
     MediaEntry,
     EventItem,
 )
-from app.credentials import CredentialManager
 from app.config import REQUEST_TIMEOUT, MAX_RETRIES
 
 
@@ -307,11 +306,7 @@ class BilibiliAdapter(BasePlatformAdapter):
             "items": [],
         }
 
-    # ==================== 观看/播放历史 ====================
 
-    def get_history(self, uid: str, period: str = "all") -> list[MediaEntry]:
-        """B站没有公开的观看历史，返回投稿作为内容列表"""
-        return []
 
     # ==================== 动态 ====================
 

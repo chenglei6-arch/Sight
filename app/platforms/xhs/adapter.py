@@ -1,17 +1,16 @@
 """
-小红书平台适配器 — 基于 cv-cat/Spider_XHS
+小红书平台适配器 — 基于 cv-cat/Spider_XHS（PC 签名栈）
 
 参考项目: https://github.com/cv-cat/Spider_XHS
-参考文档: reference/Spider_XHS-main/README.md
+上游同步说明: docs/UPSTREAM_SYNC.md
 
 架构说明:
-  - 本适配器支持 PC 和 Creator 两种模式
-  - ref_xhs_core/*, ref_xhs_pc/*, ref_xhs_creator/* 是 Spider_XHS 的移植模块
+  - ref_xhs_core/*, ref_xhs_pc/* 是 Spider_XHS 的移植模块
   - adapter.py 将这些基础 API 封装为 BasePlatformAdapter 的统一接口
 
 用法:
     from app.platforms.xhs.adapter import XhsAdapter
-    adapter = XhsAdapter(mode="pc")  # 或 mode="creator"
+    adapter = XhsAdapter()
     profile = adapter.get_profile("user_id")
 """
 import os
@@ -32,29 +31,24 @@ from app.platforms.base import (
     ContentItem,
     EventItem,
 )
-from app.credentials import CredentialManager
 from app.config import REQUEST_TIMEOUT, MAX_RETRIES
 
 
 class XhsAdapter(BasePlatformAdapter):
-    """小红书平台适配器 — 支持 PC 和 Creator 模式"""
+    """小红书平台适配器"""
 
     platform_id = "xhs"
     platform_name = "小红书"
 
-    def __init__(self, credentials: dict = None, mode: str = "pc", account_id: str = None):
+    def __init__(self, credentials: dict = None, account_id: str = None):
         """
         Args:
             credentials: 凭证字典
-            mode: "pc" 或 "creator"
             account_id: 多账号池绑定的账号 ID（None = 主账号）
         """
         super().__init__(credentials, account_id)
-        self.mode = mode
         self._auth_pc = None
-        self._auth_creator = None
         self._api_pc = None
-        self._api_creator = None
         self._last_request_at = 0.0
         # /graph 接口会从多个线程并发调用本适配器，限流必须串行化
         self._rl_lock = threading.Lock()
@@ -92,13 +86,6 @@ class XhsAdapter(BasePlatformAdapter):
         """获取 PC Auth 实例（延迟初始化）"""
         if self._auth_pc is None:
             try:
-                # 修复导入路径：需要从 app.platforms.xhs 导入
-                import sys
-                from pathlib import Path
-                xhs_path = Path(__file__).parent
-                if str(xhs_path) not in sys.path:
-                    sys.path.insert(0, str(xhs_path))
-
                 from ref_xhs_pc.auth import XHSPcAuth
                 cookie_str = self._load_cookie_str()
                 if not cookie_str:
@@ -114,41 +101,10 @@ class XhsAdapter(BasePlatformAdapter):
         return self._auth_pc
 
     @property
-    def auth_creator(self):
-        """获取 Creator Auth 实例（延迟初始化）"""
-        if self._auth_creator is None:
-            try:
-                import sys
-                from pathlib import Path
-                xhs_path = Path(__file__).parent
-                if str(xhs_path) not in sys.path:
-                    sys.path.insert(0, str(xhs_path))
-
-                from ref_xhs_creator.auth import XHSCreatorAuth
-                cookie_str = self._load_cookie_str()
-                if not cookie_str:
-                    print("[小红书] Creator Auth: Cookie 为空，部分功能受限")
-                    return None
-                self._auth_creator = XHSCreatorAuth.from_cookie(cookie_str)
-                print(f"[小红书] Creator Auth 已加载")
-            except Exception as e:
-                import traceback
-                print(f"[小红书] Creator Auth 初始化失败: {e}")
-                traceback.print_exc()
-                return None
-        return self._auth_creator
-
-    @property
     def api_pc(self):
         """获取 PC API 实例"""
         if self._api_pc is None and self.auth_pc:
             try:
-                import sys
-                from pathlib import Path
-                xhs_path = Path(__file__).parent
-                if str(xhs_path) not in sys.path:
-                    sys.path.insert(0, str(xhs_path))
-
                 from ref_apis.xhs_pc_apis import XHS_Apis
                 self._api_pc = XHS_Apis(self.auth_pc).bootstrap()
                 print(f"[小红书] PC API 已初始化")
@@ -158,27 +114,6 @@ class XhsAdapter(BasePlatformAdapter):
                 traceback.print_exc()
                 return None
         return self._api_pc
-
-    @property
-    def api_creator(self):
-        """获取 Creator API 实例"""
-        if self._api_creator is None and self.auth_creator:
-            try:
-                import sys
-                from pathlib import Path
-                xhs_path = Path(__file__).parent
-                if str(xhs_path) not in sys.path:
-                    sys.path.insert(0, str(xhs_path))
-
-                from ref_apis.xhs_creator_apis import XHS_Creator_Apis
-                self._api_creator = XHS_Creator_Apis(self.auth_creator).bootstrap()
-                print(f"[小红书] Creator API 已初始化")
-            except Exception as e:
-                import traceback
-                print(f"[小红书] Creator API 初始化失败: {e}")
-                traceback.print_exc()
-                return None
-        return self._api_creator
 
     # ==================== 限速 ====================
 
@@ -199,11 +134,8 @@ class XhsAdapter(BasePlatformAdapter):
         if not cookies:
             return False
         try:
-            if self.mode == "pc" and self.api_pc:
+            if self.api_pc:
                 success, msg, res = self.api_pc.get_user_me()
-                return success
-            elif self.mode == "creator" and self.api_creator:
-                success, msg, res = self.api_creator.get_user_me()
                 return success
             return False
         except Exception:
@@ -212,7 +144,7 @@ class XhsAdapter(BasePlatformAdapter):
     def get_login_user(self) -> Optional[dict]:
         """获取当前登录用户信息"""
         try:
-            if self.mode == "pc" and self.api_pc:
+            if self.api_pc:
                 self._rate_limit()
                 success, msg, res = self.api_pc.get_user_me()
                 if success and res:
@@ -222,16 +154,6 @@ class XhsAdapter(BasePlatformAdapter):
                         "uid": basic.get("user_id", ""),
                         "nickname": basic.get("nickname", ""),
                         "avatarUrl": basic.get("images") or basic.get("image", ""),
-                    }
-            elif self.mode == "creator" and self.api_creator:
-                self._rate_limit()
-                success, msg, res = self.api_creator.get_user_me()
-                if success and res:
-                    data = res.get("data", {})
-                    return {
-                        "uid": data.get("user_id", ""),
-                        "nickname": data.get("nickname", ""),
-                        "avatarUrl": data.get("avatar", ""),
                     }
             return None
         except Exception as e:

@@ -33,9 +33,7 @@ from app.platforms.base import (
     BasePlatformAdapter,
     PlatformProfile,
     ContentItem,
-    EventItem,
 )
-from app.credentials import CredentialManager
 from app.config import MAX_RETRIES
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -344,18 +342,3 @@ class GenshinAdapter(BasePlatformAdapter):
                 },
             ))
         return result
-
-    # ── 不支持 ──
-
-    def get_events(self, uid: str, limit: int = 30) -> list[EventItem]:
-        """深渊数据因米游社风控不可用"""
-        return []
-
-    def get_follows(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
-        return [], False, -1
-
-    def get_followers(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
-        return [], False, -1
-
-    def get_history(self, uid: str, period: str = "all") -> list:
-        return []
