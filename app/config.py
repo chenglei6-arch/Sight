@@ -1,11 +1,6 @@
 """
 应用配置
 """
-import os
-
-# ==================== 路径 ====================
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-COOKIE_FILE = os.path.join(ROOT_DIR, "cookie.txt")
 
 # ==================== 目标用户配置 ====================
 # 默认监控的平台

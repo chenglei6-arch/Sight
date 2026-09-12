@@ -39,16 +39,20 @@ python run.py
 ```text
 GET  /api/platforms
 GET  /api/{platform}/search?keyword=xxx
-GET  /api/{platform}/profile?uid=xxx
-GET  /api/{platform}/playlists?uid=xxx
-GET  /api/{platform}/events?uid=xxx
 GET  /api/{platform}/all?uid=xxx
+GET  /api/{platform}/playlist/<item_id>
 GET  /api/timeline?uids=p1:uid1,p2:uid2
-GET  /api/report/overview?platform=xxx&uid=xxx
+GET  /api/logs/recent                            内存日志缓冲尾部（SSE 降级轮询）
+GET  /api/logs/stream                            SSE 实时日志流
 
 # 关系图谱
 GET  /api/graph/search?keyword=xxx           跨平台搜索生成关系图
-POST /api/graph/social                       展开节点关注/粉丝关系
+POST /api/graph/expand/enqueue               展开任务批量入队（按平台隔离的后台队列）
+GET  /api/graph/expand/results               增量轮询某图谱的展开结果
+POST /api/graph/expand/stop                  停止某图谱的排队任务
+POST /api/graph/expand/resume                恢复熔断暂停的平台队列
+GET  /api/graph/expand/status                各平台队列状态
+POST /api/graph/refresh_nodes                批量重新拉取节点信息（重新标记大V）
 POST /api/graph/save                         按名称保存当前图谱（同名覆盖）
 GET  /api/graph/saved                        已保存图谱列表
 GET  /api/graph/saved/<id>                   图谱完整数据（免重新搜索直接渲染）

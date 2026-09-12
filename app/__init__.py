@@ -16,10 +16,6 @@ from flask import Flask
 
 def create_app() -> Flask:
     """创建并配置 Flask 应用"""
-    # 迁移旧 cookie → 新 credentials 目录
-    from app.credentials import _migrate_legacy_cookie
-    _migrate_legacy_cookie()
-
     app = Flask(
         __name__,
         static_folder="web",      # Vite 构建产物目录（frontend/ 执行 npm run build 生成）

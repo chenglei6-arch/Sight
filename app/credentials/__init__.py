@@ -221,17 +221,3 @@ class CredentialManager:
         cls._write_accounts_file(data)
         return True
 
-
-# 迁移旧 cookie.txt → credentials/netease_cookie.txt
-def _migrate_legacy_cookie():
-    """将根目录的旧 cookie.txt 迁移到新位置"""
-    old_path = CREDENTIALS_DIR.parent / "cookie.txt"
-    new_path = CREDENTIALS_DIR / "netease_cookie.txt"
-
-    if old_path.exists() and not new_path.exists():
-        print(f"[migrate] 迁移 cookie: {old_path} → {new_path}")
-        with open(old_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        CREDENTIALS_DIR.mkdir(parents=True, exist_ok=True)
-        with open(new_path, "w", encoding="utf-8") as f:
-            f.write(content)
