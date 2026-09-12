@@ -405,6 +405,7 @@ const frozenPos = new Map()
 const bulk = reactive({
   busy: false, done: 0, total: 0, stop: false,
   addNodes: 0, addEdges: 0, icHits: 0, failed: 0, failReasons: new Map(),
+  ids: new Set(), // 本次一键展开入队的任务 id：进度只统计这些，历史积压/单独展开的结果不占进度
 })
 const bulkMsg = ref('')
 
@@ -665,6 +666,7 @@ async function bulkExpand() {
     bulk.icHits = 0
     bulk.failed = 0
     bulk.failReasons = new Map()
+    bulk.ids = new Set()
   }
   bulkMsg.value = `正在把 ${targets.length} 个节点加入展开队列…`
   const stats = await enqueueExpandTasks(
@@ -689,6 +691,7 @@ async function bulkExpand() {
   bulk.busy = true
   bulk.total += stats.queued + stats.duplicates
   bulk.done += stats.duplicates // 去重跳过的视为已完成，保证 done/total 对得上
+  for (const id of stats.task_ids || []) bulk.ids.add(id) // 圈定本批任务：轮询只对它们计进度
   bulk.failed += stats.rejected
   if (stats.rejected) bulk.failReasons.set('入队被拒（预算超限/队列暂停/平台不可用）', stats.rejected)
   bulkMsg.value = stats.queued
@@ -726,7 +729,23 @@ async function enqueueExpandTasks(items) {
 
 // 轮询循环：有排队/执行中的任务时每 1.5s 增量拉一次完结结果并合并；空闲即退出。
 // gen 计数防竞态：轮询期间又发生了入队则不退出，避免新任务的结果没人合并
-const queuePoll = reactive({ active: false, cursors: new Map(), gen: 0 }) // cursors: graph_id -> 已读到的任务 id
+const EXPAND_CURSOR_KEY = 'graph_expand_poll_cursors'
+// 游标 localStorage 持久化：刷新/重进视图后从上次读到的任务 id 续拉。
+// 否则游标归零会把近 24h 的历史完结任务重读一遍，白白重复合并、进度乱跳。
+function loadExpandCursors() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(EXPAND_CURSOR_KEY) || '[]')
+    return Array.isArray(arr) ? arr.filter(([g, v]) => typeof g === 'string' && Number.isFinite(v)) : []
+  } catch {
+    return []
+  }
+}
+function saveExpandCursors() {
+  try {
+    localStorage.setItem(EXPAND_CURSOR_KEY, JSON.stringify([...queuePoll.cursors]))
+  } catch { /* 存储不可写时退化为内存游标 */ }
+}
+const queuePoll = reactive({ active: false, cursors: new Map(loadExpandCursors()), gen: 0 }) // cursors: graph_id -> 已读到的任务 id
 const pausedQueues = ref([]) // 熔断暂停的平台队列 [{platform, reason}]
 
 function startQueuePolling() {
@@ -766,6 +785,7 @@ async function pollQueueLoop() {
     }
     pausedQueues.value = data.paused || []
     queuePoll.cursors.set(gid, data.cursor || queuePoll.cursors.get(gid) || 0)
+    saveExpandCursors()
     if (changed) {
       syncFrozenPositions()
       chart?.setOption(buildOption())
@@ -825,8 +845,9 @@ function applyTaskResult(r) {
             (errs.length ? ` · 部分失败：${errs.map(([, v]) => v).join('；')}` : ''))
     }
   }
-  // 一键展开计数（任务可能同时被单独展开与一键展开引用，两边各自累计）
-  if (bulk.busy) {
+  // 一键展开计数：只统计本次批量入队的任务（bulk.ids）。
+  // 历史积压结果（刷新后重读）与单独展开的任务不在集合里，合并进图但不占进度。
+  if (bulk.busy && bulk.ids.has(r.id)) {
     bulk.done++
     if (r.status !== 'done') {
       bulk.failed++

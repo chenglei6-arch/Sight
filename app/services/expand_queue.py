@@ -256,10 +256,12 @@ class ExpandQueueManager:
         批量入队。items 每项: platform, uid, nickname?, 以及 expand_social 的参数
         （follows_limit/followers_limit/skip/known_ids/intercheck_*）。
         同图同 uid 已在排队/执行中时跳过（去重），预算超限或平台队列熔断暂停的拒绝。
-        返回 {queued, duplicates, rejected, paused: [{platform, reason}]}
+        返回 {queued, duplicates, rejected, task_ids, paused: [{platform, reason}]}，
+        task_ids 为本次新入队任务的自增 id，前端以此圈定进度统计范围。
         """
         self.recover()
         queued = duplicates = rejected = 0
+        task_ids: list[int] = []
         paused_now = self.paused_queues()
         paused_by_pid = {p["platform"] for p in paused_now}
         in_flight_keys = {
@@ -310,6 +312,7 @@ class ExpandQueueManager:
                               graph_id=graph_id, params={**params, "known_ids": known_ids})
             if q.push(task):
                 queued += 1
+                task_ids.append(task.id)
             else:
                 # 队列满：回滚登记记录
                 try:
@@ -319,7 +322,7 @@ class ExpandQueueManager:
                 rejected += 1
         return {
             "queued": queued, "duplicates": duplicates, "rejected": rejected,
-            "paused": paused_now,
+            "task_ids": task_ids, "paused": paused_now,
         }
 
     # ==================== 控制 / 查询 ====================
