@@ -1,4 +1,6 @@
 <script setup>
+import { computed } from 'vue'
+
 const props = defineProps({
   name: { type: String, required: true },
   size: { type: [Number, String], default: 16 },
@@ -30,7 +32,6 @@ const ICONS = {
     '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',
   calendar:
     '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
-  square: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
   play: '<polygon points="6 4 20 12 6 20 6 4"/>',
   pause: '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>',
   alert:
@@ -44,7 +45,8 @@ const ICONS = {
     '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
 }
 
-const html = ICONS[props.name] || ICONS.grid
+// computed：name 变化时图标随之更新（TerminalPanel/ViewGraph 有动态 :name 切换）
+const html = computed(() => ICONS[props.name] || ICONS.grid)
 </script>
 
 <template>

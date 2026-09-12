@@ -12,21 +12,17 @@ import { api } from '../api'
  */
 const open = defineModel({ type: Boolean, default: false })
 
-const emit = defineEmits(['closed'])
-
 const phase = ref('idle') // idle | starting | qr_ready | logged_in | fetching | done | error
 const qrImage = ref('')
 const statusText = ref('')
 const errorMsg = ref('')
 const followData = ref(null)
-const showRaw = ref(false)
 
 let pollTimer = null
 
 const phaseNote = computed(
   () =>
     ({
-      idle: '正在启动…',
       starting: '正在生成二维码…',
       logged_in: '扫码成功，正在获取关注列表…',
       fetching: '正在获取关注列表…',
@@ -95,7 +91,6 @@ async function cancel() {
   stopPolling()
   open.value = false
   api.post('/qqmusic/qr-login/stop').catch(() => {})
-  emit('closed')
 }
 
 watch(open, (v) => {

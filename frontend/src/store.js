@@ -186,10 +186,6 @@ export async function loadPlatformsMeta() {
   }
 }
 
-export function platformMeta(platformId) {
-  return state.platformsMeta.find((p) => p.id === platformId) || null
-}
-
 // ==================== 时间线 ====================
 
 export function timelineUidPairs() {
@@ -305,10 +301,6 @@ export function openAccountModal(platformId = '') {
 
 export function closeAccountModal() {
   state.accountModal.open = false
-}
-
-export function closeQrLogin() {
-  state.qrOpen = false
 }
 
 // ==================== 终端面板与队列状态 ====================

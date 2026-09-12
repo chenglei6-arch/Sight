@@ -15,7 +15,7 @@ const platform = PLATFORM_MAP[props.platformId]
 
 const badges = computed(() => {
   const out = []
-  const vip = platform.vipLabel(props.profile)
+  const vip = platform.vipLabel?.(props.profile)
   if (vip) out.push(vip)
   return out
 })

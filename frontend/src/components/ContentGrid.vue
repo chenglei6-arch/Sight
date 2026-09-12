@@ -23,6 +23,20 @@ function charName(it) {
   return splitTitle(it.title).name
 }
 
+function mediaMeta(it) {
+  const parts = []
+  if (it.view_count) parts.push(`${fmtNum(it.view_count)} 播放`)
+  if (kind === 'video') {
+    if (it.extra?.danmaku_count) parts.push(`${fmtNum(it.extra.danmaku_count)} 弹幕`)
+    if (it.extra?.length) parts.push(it.extra.length)
+  } else {
+    if (it.extra?.digg_count) parts.push(`${fmtNum(it.extra.digg_count)} 赞`)
+    if (it.extra?.comment_count) parts.push(`${fmtNum(it.extra.comment_count)} 评论`)
+    if (it.extra?.duration) parts.push(fmtDuration(it.extra.duration))
+  }
+  return parts
+}
+
 function onCardClick(it) {
   if (kind === 'playlist' && platform.hasDetail) {
     openDetail(props.platformId, it.item_id)
@@ -30,10 +44,6 @@ function onCardClick(it) {
   }
   const link = platform.itemLink(it)
   if (link) window.open(link, '_blank', 'noopener')
-}
-
-function cardClickable(it) {
-  return (kind === 'playlist' && platform.hasDetail) || !!platform.itemLink(it)
 }
 </script>
 
@@ -67,8 +77,8 @@ function cardClickable(it) {
       </button>
     </template>
 
-    <!-- B站投稿 -->
-    <template v-else-if="kind === 'video'">
+    <!-- 带封面媒体（B站投稿 / 抖音作品），meta 字段按 kind 区分 -->
+    <template v-else-if="kind === 'video' || kind === 'work'">
       <button v-for="it in shown" :key="it.item_id" class="citem media" @click="onCardClick(it)">
         <span class="cover wide" :style="{ background: platform.color + '14' }">
           <img
@@ -82,37 +92,7 @@ function cardClickable(it) {
         </span>
         <span class="ci-body">
           <span class="ci-title" :title="it.title">{{ it.title || '无标题' }}</span>
-          <span class="ci-meta">
-            <template v-if="it.view_count">{{ fmtNum(it.view_count) }} 播放</template>
-            <template v-if="it.extra?.danmaku_count"> · {{ fmtNum(it.extra.danmaku_count) }} 弹幕</template>
-            <template v-if="it.extra?.length"> · {{ it.extra.length }}</template>
-          </span>
-          <span class="ci-sub">{{ it.create_time ? fmtEventTime(Number(it.create_time)) : '' }}</span>
-        </span>
-      </button>
-    </template>
-
-    <!-- 抖音作品 -->
-    <template v-else-if="kind === 'work'">
-      <button v-for="it in shown" :key="it.item_id" class="citem media" @click="onCardClick(it)">
-        <span class="cover wide" :style="{ background: platform.color + '14' }">
-          <img
-            v-if="it.cover_url"
-            :src="it.cover_url"
-            referrerpolicy="no-referrer"
-            loading="lazy"
-            alt=""
-            @error="$event.target.style.display = 'none'"
-          />
-        </span>
-        <span class="ci-body">
-          <span class="ci-title" :title="it.title">{{ it.title || '无标题' }}</span>
-          <span class="ci-meta">
-            <template v-if="it.view_count">{{ fmtNum(it.view_count) }} 播放</template>
-            <template v-if="it.extra?.digg_count"> · {{ fmtNum(it.extra.digg_count) }} 赞</template>
-            <template v-if="it.extra?.comment_count"> · {{ fmtNum(it.extra.comment_count) }} 评论</template>
-            <template v-if="it.extra?.duration"> · {{ fmtDuration(it.extra.duration) }}</template>
-          </span>
+          <span class="ci-meta">{{ mediaMeta(it).join(' · ') }}</span>
           <span class="ci-sub">{{ it.create_time ? fmtEventTime(Number(it.create_time)) : '' }}</span>
         </span>
       </button>

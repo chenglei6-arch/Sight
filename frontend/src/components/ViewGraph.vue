@@ -76,12 +76,6 @@ function irrelevantReason(n) {
   return `粉丝 ${fmtNum(Number(n.fans))}，疑似大V/公众账号`
 }
 
-// 判断用户节点是否在当前视图下被隐藏/排除
-function isNodeHidden(n) {
-  if (!n) return false
-  const id = n.id || `${n.platform}:${n.uid}`
-  return hiddenNodeIds.has(id) || isIrrelevant(n)
-}
 // 隐藏 removeId 后会"悬空"的节点：从关键词根 BFS（跳过 removeId 与已隐藏节点），
 // 不可达的可见用户节点 = 仅通过 removeId 连入图的私有后代（含递归孙节点），需连带隐藏。
 // 有 hit/same/alike 等其他连边锚在图上的节点仍可达，不会被误删

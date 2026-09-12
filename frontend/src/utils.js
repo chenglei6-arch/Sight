@@ -56,19 +56,6 @@ export function fmtTimeHM(ms) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-/** 毫秒时间戳 -> YYYY-MM-DD HH:mm，兼容秒级输入 */
-export function fmtDateTime(ms) {
-  const date = fmtDate(ms)
-  if (!date) return ''
-  return `${date} ${fmtTimeHM(ms)}`
-}
-
-/** Date -> HH:MM:SS（页面更新时间用） */
-export function fmtClock(d) {
-  if (!(d instanceof Date)) return ''
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-}
-
 /** 时间戳 -> MM-DD HH:mm（当年省略年份，跨年补年份），兼容秒级输入 */
 export function fmtEventTime(ms) {
   const ts = toMs(ms)

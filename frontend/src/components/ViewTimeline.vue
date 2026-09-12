@@ -8,7 +8,7 @@ import {
   timelineUidPairs,
   deleteTimelineEntry,
 } from '../store'
-import { PLATFORM_MAP } from '../platforms'
+import { PLATFORM_MAP, platformColor } from '../platforms'
 import { fmtDate, fmtTimeHM } from '../utils'
 
 /**
@@ -59,10 +59,6 @@ function entryDisplay(e) {
   const ts = Number(e.timestamp) || 0
   const time = ts ? fmtTimeHM(ts) : (e.created_at || '').slice(11, 16)
   return { platformName, time, suffix: '' }
-}
-
-function platformColor(id) {
-  return PLATFORM_MAP[id]?.color || '#9aa1ab'
 }
 
 function suffixClass(suffix) {

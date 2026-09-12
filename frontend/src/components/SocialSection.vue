@@ -39,50 +39,33 @@ function goUser(u) {
   const uid = pickUid(u)
   if (uid) setUid(props.platformId, uid)
 }
+
+const panels = computed(() => [
+  { icon: 'user', label: '关注', list: props.follows, countOnly: followsCountOnly.value },
+  { icon: 'users', label: '粉丝', list: props.followers, countOnly: followersCountOnly.value },
+])
 </script>
 
 <template>
   <div class="social">
-    <div class="card social-panel">
+    <div v-for="p in panels" :key="p.label" class="card social-panel">
       <div class="panel-head">
-        <Icon name="user" :size="13" />
-        关注
-        <span class="panel-count">{{ follows.length || followsCountOnly || '' }}</span>
+        <Icon :name="p.icon" :size="13" />
+        {{ p.label }}
+        <span class="panel-count">{{ p.list.length || p.countOnly || '' }}</span>
       </div>
-      <template v-if="follows.length">
-        <button v-for="(u, i) in follows.slice(0, MAX)" :key="i" class="social-row" @click="goUser(u)">
+      <template v-if="p.list.length">
+        <button v-for="(u, i) in p.list.slice(0, MAX)" :key="i" class="social-row" @click="goUser(u)">
           <UserAvatar :src="u.avatarUrl" :name="u.nickname" :size="32" :color="platform.color" />
           <span class="s-main">
             <span class="s-name">{{ u.nickname || '未知' }}</span>
             <span v-if="u.signature" class="s-sig">{{ u.signature }}</span>
           </span>
         </button>
-        <div v-if="follows.length > MAX" class="social-more">仅显示前 {{ MAX }} 个</div>
+        <div v-if="p.list.length > MAX" class="social-more">仅显示前 {{ MAX }} 个</div>
       </template>
-      <div v-else-if="followsCountOnly" class="social-note">
-        共 {{ followsCountOnly }} 人，加密账号暂无法获取列表
-      </div>
-      <div v-else class="social-note">暂无数据</div>
-    </div>
-
-    <div class="card social-panel">
-      <div class="panel-head">
-        <Icon name="users" :size="13" />
-        粉丝
-        <span class="panel-count">{{ followers.length || followersCountOnly || '' }}</span>
-      </div>
-      <template v-if="followers.length">
-        <button v-for="(u, i) in followers.slice(0, MAX)" :key="i" class="social-row" @click="goUser(u)">
-          <UserAvatar :src="u.avatarUrl" :name="u.nickname" :size="32" :color="platform.color" />
-          <span class="s-main">
-            <span class="s-name">{{ u.nickname || '未知' }}</span>
-            <span v-if="u.signature" class="s-sig">{{ u.signature }}</span>
-          </span>
-        </button>
-        <div v-if="followers.length > MAX" class="social-more">仅显示前 {{ MAX }} 个</div>
-      </template>
-      <div v-else-if="followersCountOnly" class="social-note">
-        共 {{ followersCountOnly }} 人，加密账号暂无法获取列表
+      <div v-else-if="p.countOnly" class="social-note">
+        共 {{ p.countOnly }} 人，加密账号暂无法获取列表
       </div>
       <div v-else class="social-note">暂无数据</div>
     </div>
