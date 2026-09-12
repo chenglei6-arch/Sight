@@ -2,27 +2,14 @@
 多平台 REST API 路由
 
 URL 模式:
-  /api/<platform>/profile?uid=xxx      用户资料
   /api/<platform>/search?keyword=xxx   搜索用户
-  /api/<platform>/playlists?uid=xxx    内容列表
   /api/<platform>/playlist/<id>        内容详情
-  /api/<platform>/records?uid=xxx      历史排行
-  /api/<platform>/events?uid=xxx       用户动态
-  /api/<platform>/follows?uid=xxx      关注
-  /api/<platform>/followers?uid=xxx    粉丝
-
-历史 & 报告:
-  /api/history/snap?platform=..&uid=..&type=..  获取快照
-  /api/history/save                            手动保存快照
-  /api/report/overview?platform=..&uid=..       用户概览
-  /api/report/trend?platform=..&uid=..&type=..  趋势报告
-  /api/report/cross-platform?uids=..            跨平台汇总
+  /api/<platform>/all?uid=xxx          聚合数据（资料/内容/历史/动态/关注/粉丝）
 
 关系图谱:
   /api/graph/search?keyword=..&platforms=..&keywords=..  跨平台搜索生成关系图
       keywords 为可选 JSON 对象（{"douyin":"戾清"}），给单个平台指定专属搜索词，
       未指定的平台沿用 keyword；目标人物在各平台昵称不同时使用
-  /api/graph/social (POST)                      展开节点社交关系（同步单次）
   /api/graph/expand/enqueue (POST)              展开任务批量入队（按平台隔离的后台队列）
   /api/graph/expand/results                     增量轮询某图谱的展开结果
   /api/graph/expand/stop (POST)                 停止某图谱的排队任务
@@ -33,9 +20,20 @@ URL 模式:
   /api/graph/saved                              已保存图谱列表
   /api/graph/saved/<id>                         图谱完整数据（GET）/ 删除（DELETE）
 
+时间线:
+  /api/timeline?uids=..&source=live|stored&format=json|text|markdown
+  /api/timeline/<id> (PUT/DELETE)               条目编辑/删除
+
+QQ音乐扫码登录:
+  /api/qqmusic/qr-login/start|status|stop
+
+日志:
+  /api/logs/recent /api/logs/stream(SSE)
+
 管理:
-  /api/platforms                   列出所有平台
-  /api/credentials                 查看/更新凭证
+  /api/platforms                                列出所有平台
+  /api/credentials/<platform>                   查看/更新凭证
+  /api/accounts/<platform>                      多账号管理
 """
 import json
 import time
@@ -49,16 +47,14 @@ from flask import Blueprint, Response, jsonify, request
 from app.platforms import get_adapter, get_pool, list_platforms, reset_adapter, reset_pool
 from app.config import DEFAULT_TARGET_UID, DEFAULT_PLATFORM
 from app.data.store import DataStore
-from app.report.generator import ReportGenerator
 from app.credentials import CredentialManager
 from app.services.log_hub import get_log_hub
-from app.services.social_expander import expand_social, graph_user_node
+from app.services.social_expander import graph_user_node
 from app.services.expand_queue import get_expand_queue
 
 bp = Blueprint("api", __name__, url_prefix="/api")
 
 _store = None
-_report = None
 
 # 请求日志目录
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
@@ -137,12 +133,6 @@ def get_store() -> DataStore:
         _store = DataStore()
     return _store
 
-
-def get_report() -> ReportGenerator:
-    global _report
-    if _report is None:
-        _report = ReportGenerator(get_store())
-    return _report
 
 
 # ==================== 辅助函数 ====================
@@ -521,19 +511,6 @@ def _clamp_int(v, lo, hi, default):
         return default
 
 
-@bp.route("/graph/social", methods=["POST"])
-def graph_social():
-    """
-    展开某用户的社交关系（同步单次），返回可合并进关系图的 nodes/edges。
-    核心实现见 app/services/social_expander.py；批量/后台展开走 /graph/expand/* 队列接口。
-    """
-    body = request.get_json(silent=True) or {}
-    try:
-        return _result(expand_social(body))
-    except ValueError as e:
-        return _error(str(e), http_status=400 if "缺少" in str(e) else 404)
-
-
 @bp.route("/graph/expand/enqueue", methods=["POST"])
 def graph_expand_enqueue():
     """
@@ -754,65 +731,6 @@ def graph_saved_delete(graph_id):
         return _error(str(e))
 
 
-# ==================== 用户资料 ====================
-
-@bp.route("/<platform>/profile")
-def user_profile(platform):
-    """获取用户资料"""
-    uid = _get_uid(platform)
-    if not uid:
-        return _error("未指定用户 UID，且无默认配置")
-
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
-
-    try:
-        profile = adapter.get_profile(uid)
-        if profile is None:
-            return _error("获取资料失败")
-
-        # 转为字典进行存储和返回
-        data = _dataclass_to_dict(profile)
-
-        # 自动保存快照
-        try:
-            get_store().save_snapshot(platform, uid, "profile", data)
-        except Exception:
-            pass
-
-        return _result(data)
-    except Exception as e:
-        return _error(str(e))
-
-
-# ==================== 内容列表（歌单/收藏夹） ====================
-
-@bp.route("/<platform>/playlists")
-def content_lists(platform):
-    """获取用户内容列表"""
-    uid = _get_uid(platform)
-    if not uid:
-        return _error("未指定用户 UID")
-
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
-
-    try:
-        items = adapter.get_content_lists(uid)
-        data = [_dataclass_to_dict(item) for item in items]
-
-        get_store().save_snapshot(platform, uid, "playlists", {
-            "count": len(data),
-            "items": data,
-        })
-
-        return _result(data)
-    except Exception as e:
-        return _error(str(e))
-
-
 @bp.route("/<platform>/playlist/<item_id>")
 def content_detail(platform, item_id):
     """获取内容详情"""
@@ -825,98 +743,6 @@ def content_detail(platform, item_id):
         if detail is None:
             return _error("获取详情失败")
         return _result(detail)
-    except Exception as e:
-        return _error(str(e))
-
-
-# ==================== 历史排行 ====================
-
-@bp.route("/<platform>/records")
-def history_records(platform):
-    """获取历史排行（听歌/观看）"""
-    uid = _get_uid(platform)
-    if not uid:
-        return _error("未指定用户 UID")
-
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
-
-    try:
-        all_time = adapter.get_history(uid, "all")
-        weekly = adapter.get_history(uid, "week")
-
-        all_data = [_dataclass_to_dict(e) for e in all_time]
-        week_data = [_dataclass_to_dict(e) for e in weekly]
-
-        get_store().save_snapshot(platform, uid, "records", {
-            "allTime": all_data,
-            "weekly": week_data,
-        })
-
-        return _result({
-            "allTime": all_data,
-            "weekly": week_data,
-        })
-    except Exception as e:
-        return _error(str(e))
-
-
-# ==================== 动态 ====================
-
-@bp.route("/<platform>/events")
-def user_events(platform):
-    """获取用户动态"""
-    uid = _get_uid(platform)
-    if not uid:
-        return _error("未指定用户 UID")
-
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
-
-    try:
-        events = adapter.get_events(uid)
-        data = [_dataclass_to_dict(e) for e in events]
-
-        get_store().save_snapshot(platform, uid, "events", {
-            "count": len(data),
-            "items": data,
-        })
-
-        return _result(data)
-    except Exception as e:
-        return _error(str(e))
-
-
-# ==================== 关注/粉丝 ====================
-
-@bp.route("/<platform>/follows")
-def user_follows(platform):
-    uid = _get_uid(platform)
-    if not uid:
-        return _error("未指定用户 UID")
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
-    try:
-        items, _more, _total = adapter.get_follows(uid)
-        return _result(items)
-    except Exception as e:
-        return _error(str(e))
-
-
-@bp.route("/<platform>/followers")
-def user_followers(platform):
-    uid = _get_uid(platform)
-    if not uid:
-        return _error("未指定用户 UID")
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
-    try:
-        items, _more, _total = adapter.get_followers(uid)
-        return _result(items)
     except Exception as e:
         return _error(str(e))
 
@@ -1208,33 +1034,6 @@ def qr_login_status():
     return _result(session.get_status_dict())
 
 
-@bp.route("/qqmusic/qr-login/follows")
-def qr_login_follows():
-    """获取关注列表（登录后使用）"""
-    uid = request.args.get("uid", "oK6kowEAoK4z7Knioivl7evl7n**")
-    from app.services.qqmusic_qr_login import get_session
-    session = get_session()
-    status_data = session.get_status_dict()
-
-    # 如果已经登录但还未抓取，返回当前状态
-    if status_data["status"] == "done" and status_data.get("follow_data"):
-        return _result(status_data["follow_data"])
-
-    # 如果还在进行中，告知状态
-    if status_data["status"] in ("logged_in", "fetching", "starting", "qr_ready"):
-        return _result({
-            "status": status_data["status"],
-            "message": "请等待登录完成后自动获取",
-        })
-
-    # 未开始或已停止：启动新流程
-    result = session.start(uid)
-    return _result({
-        "status": result["status"],
-        "message": "扫码登录流程已启动",
-    })
-
-
 @bp.route("/qqmusic/qr-login/stop", methods=["POST"])
 def qr_login_stop():
     """停止 QR 登录会话"""
@@ -1260,144 +1059,6 @@ def platform_status(platform):
             "alive": alive,
             "login_user": login_user,
         })
-    except Exception as e:
-        return _error(str(e))
-
-
-# ==================== 历史快照 ====================
-
-@bp.route("/history/snapshots")
-def get_snapshots():
-    """获取历史快照"""
-    platform = request.args.get("platform", "")
-    uid = request.args.get("uid", "")
-    data_type = request.args.get("type", "profile")
-    since = request.args.get("since", None)
-    limit = int(request.args.get("limit", 50))
-
-    if not platform or not uid:
-        return _error("缺少 platform 或 uid 参数", http_status=400)
-
-    try:
-        snaps = get_store().get_snapshots(platform, uid, data_type, since, limit)
-        return _result(snaps)
-    except Exception as e:
-        return _error(str(e))
-
-
-@bp.route("/history/save", methods=["POST"])
-def save_snapshot():
-    """手动保存当前数据快照"""
-    body = request.get_json(force=True, silent=True) or {}
-    platform = body.get("platform", DEFAULT_PLATFORM)
-    uid = body.get("uid", _get_uid(platform))
-    data_type = body.get("type", "profile")
-
-    if not uid:
-        return _error("未指定用户 UID", http_status=400)
-
-    adapter = get_adapter(platform)
-    if not adapter:
-        return _error(f"未知平台: {platform}", http_status=404)
-
-    try:
-        if data_type == "profile":
-            profile = adapter.get_profile(uid)
-            if profile:
-                get_store().save_snapshot(platform, uid, "profile", _dataclass_to_dict(profile))
-                return _result({"saved": "profile"})
-        elif data_type == "records":
-            all_time = adapter.get_history(uid, "all")
-            weekly = adapter.get_history(uid, "week")
-            get_store().save_snapshot(platform, uid, "records", {
-                "allTime": [_dataclass_to_dict(e) for e in all_time],
-                "weekly": [_dataclass_to_dict(e) for e in weekly],
-            })
-            return _result({"saved": "records"})
-        elif data_type == "playlists":
-            items = adapter.get_content_lists(uid)
-            get_store().save_snapshot(platform, uid, "playlists", {
-                "count": len(items),
-                "items": [_dataclass_to_dict(item) for item in items],
-            })
-            return _result({"saved": "playlists"})
-        elif data_type == "events":
-            events = adapter.get_events(uid)
-            get_store().save_snapshot(platform, uid, "events", {
-                "count": len(events),
-                "items": [_dataclass_to_dict(e) for e in events],
-            })
-            return _result({"saved": "events"})
-
-        return _error(f"未知类型: {data_type}", http_status=400)
-    except Exception as e:
-        return _error(str(e))
-
-
-@bp.route("/history/tracked-users")
-def tracked_users():
-    """获取所有追踪过的用户列表"""
-    try:
-        users = get_store().get_all_tracked_users()
-        return _result(users)
-    except Exception as e:
-        return _error(str(e))
-
-
-# ==================== 报告 ====================
-
-@bp.route("/report/overview")
-def report_overview():
-    """生成用户概览报告"""
-    platform = request.args.get("platform", DEFAULT_PLATFORM)
-    uid = request.args.get("uid", _get_uid(platform))
-    if not uid:
-        return _error("未指定用户 UID", http_status=400)
-
-    try:
-        report = get_report().user_overview(platform, uid)
-        return _result(report)
-    except Exception as e:
-        return _error(str(e))
-
-
-@bp.route("/report/trend")
-def report_trend():
-    """生成趋势报告"""
-    platform = request.args.get("platform", DEFAULT_PLATFORM)
-    uid = request.args.get("uid", _get_uid(platform))
-    data_type = request.args.get("type", "profile")
-    since = request.args.get("since", None)
-
-    if not uid:
-        return _error("未指定用户 UID", http_status=400)
-
-    try:
-        report = get_report().trend_report(platform, uid, data_type, since)
-        return _result(report)
-    except Exception as e:
-        return _error(str(e))
-
-
-@bp.route("/report/cross-platform")
-def report_cross_platform():
-    """跨平台汇总报告"""
-    uids_param = request.args.get("uids", "")
-    if not uids_param:
-        return _error("请提供 uids 参数，格式: netease:5012722824,bilibili:123456", http_status=400)
-
-    uid_map = {}
-    for pair in uids_param.split(","):
-        parts = pair.strip().split(":")
-        if len(parts) == 2:
-            uid_map[parts[0]] = parts[1]
-
-    if not uid_map:
-        return _error("无法解析 uids 参数", http_status=400)
-
-    try:
-        report = get_report().cross_platform_report(uid_map)
-        return _result(report)
     except Exception as e:
         return _error(str(e))
 
@@ -1547,90 +1208,6 @@ def delete_timeline_entry(entry_id):
             return _error("条目不存在", http_status=404)
     except Exception as e:
         return _error(str(e))
-
-
-# ==================== 歌单歌曲异步拉取 ====================
-
-@bp.route("/<platform>/fetch-songs/start", methods=["POST"])
-def start_fetch_songs(platform):
-    """启动后台异步拉取歌单歌曲详情"""
-    uid = request.args.get("uid", _get_uid(platform))
-    if not uid:
-        return _error("未指定用户 UID", http_status=400)
-
-    try:
-        from app.services.playlist_fetcher import get_playlist_fetcher
-        fetcher = get_playlist_fetcher()
-        status = fetcher.start_fetch(platform, uid)
-        return _result(status)
-    except Exception as e:
-        return _error(str(e))
-
-
-@bp.route("/<platform>/fetch-songs/status")
-def fetch_songs_status(platform):
-    """查询歌单歌曲拉取进度"""
-    uid = request.args.get("uid", _get_uid(platform))
-    if not uid:
-        return _error("未指定用户 UID", http_status=400)
-
-    try:
-        from app.services.playlist_fetcher import get_playlist_fetcher
-        fetcher = get_playlist_fetcher()
-        status = fetcher.get_status(platform, uid)
-        return _result(status)
-    except Exception as e:
-        return _error(str(e))
-
-
-# ==================== 旧路由兼容（无 platform 参数时默认 netease） ====================
-
-@bp.route("/user/search")
-def search_user_legacy():
-    """[兼容] 搜索用户 - 默认网易云"""
-    return search_user("netease")
-
-
-@bp.route("/user/profile")
-def user_profile_legacy():
-    """[兼容] 用户资料 - 默认网易云"""
-    return user_profile("netease")
-
-
-@bp.route("/user/playlists")
-def content_lists_legacy():
-    """[兼容] 内容列表 - 默认网易云"""
-    return content_lists("netease")
-
-
-@bp.route("/user/playlist/<item_id>")
-def content_detail_legacy(item_id):
-    """[兼容] 内容详情 - 默认网易云"""
-    return content_detail("netease", item_id)
-
-
-@bp.route("/user/record")
-def history_records_legacy():
-    """[兼容] 历史排行 - 默认网易云"""
-    return history_records("netease")
-
-
-@bp.route("/user/events")
-def user_events_legacy():
-    """[兼容] 用户动态 - 默认网易云"""
-    return user_events("netease")
-
-
-@bp.route("/user/follows")
-def user_follows_legacy():
-    """[兼容] 关注 - 默认网易云"""
-    return user_follows("netease")
-
-
-@bp.route("/user/followeds")
-def user_followeds_legacy():
-    """[兼容] 粉丝 - 默认网易云"""
-    return user_followers("netease")
 
 
 # ==================== 辅助函数 ====================

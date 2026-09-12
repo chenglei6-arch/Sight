@@ -88,15 +88,6 @@ class TimelineEntry:
             until = tr.get("until", "")
             return f"{self.platform}:{self.uid}:playlist:{item_id}:{change_type}:{since}:{until}"
 
-        elif raw_type == "song_change":
-            playlist_id = data.get("playlist_id", "")
-            song_id = data.get("song_id", "")
-            change_type = data.get("change_type", "")
-            tr = data.get("time_range", {}) or {}
-            since = tr.get("since", "")
-            until = tr.get("until", "")
-            return f"{self.platform}:{self.uid}:song_change:{playlist_id}:{song_id}:{change_type}:{since}:{until}"
-
         else:
             # 兜底：对整个 raw 做哈希
             raw_str = json.dumps(self.raw, sort_keys=True, ensure_ascii=False)
@@ -417,20 +408,6 @@ class TimelineBuilder:
             except Exception as e:
                 print(f"[Timeline] {platform_id} 作品检测失败: {e}")
 
-            # ---- 歌单内歌曲变化（快照对比推断）----
-            try:
-                song_changes = store.detect_playlist_song_changes(platform_id, uid)
-                if song_changes.get("has_data") and song_changes["changes"]:
-                    sc_added = 0
-                    for sc in song_changes["changes"]:
-                        entry = cls._build_song_change_entry(platform_id, uid, pname, sc)
-                        entries.append(entry)
-                        sc_added += 1
-                    platform_count += sc_added
-                    print(f"[Timeline] {platform_id}:{uid} 歌单歌曲变化加入 {sc_added} 条")
-            except Exception as e:
-                print(f"[Timeline] {platform_id} 歌曲变化检测失败: {e}")
-
             print(f"[Timeline] {platform_id}:{uid} 本平台共加入 {platform_count} 条")
 
         print(f"[Timeline] 合计 {len(entries)} 条，来自 {list(platform_uids.keys())}")
@@ -709,60 +686,6 @@ class TimelineBuilder:
             time_suffix=time_suffix,
             time_range=time_range or {},
             raw={"type": "playlist_change", "data": change},
-        )
-
-    @classmethod
-    def _build_song_change_entry(
-        cls, platform: str, uid: str, pname: str, change: dict
-    ) -> TimelineEntry:
-        """根据歌单内歌曲变化构建时间线条目"""
-        playlist_title = change.get("playlist_title", "")
-        song_title = change.get("song_title", "")
-        artist = change.get("artist", "")
-        change_type = change.get("change_type", "song_added")
-        time_range = change.get("time_range")
-
-        since_str = time_range.get("since", "") if time_range else ""
-        until_str = time_range.get("until", "") if time_range else ""
-
-        since_readable = cls._iso_to_readable(since_str)
-        until_readable = cls._iso_to_readable(until_str)
-
-        try:
-            dt_until = datetime.fromisoformat(until_str) if until_str else None
-            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
-            time_str = until_readable
-        except (ValueError, TypeError):
-            timestamp = 0
-            time_str = ""
-
-        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
-
-        # 歌单歌曲变化目前只有网易云，用"歌单"为标签
-        song_change_label = "歌单"
-
-        if change_type == "song_added":
-            summary = f"[{pname}] 在{song_change_label}《{playlist_title}》中加入《{song_title}》"
-        elif change_type == "song_removed":
-            summary = f"[{pname}] 从{song_change_label}《{playlist_title}》中移除《{song_title}》"
-        else:
-            summary = f"[{pname}] {song_change_label}《{playlist_title}》变化: {song_title}"
-
-        if artist:
-            summary += f" - {artist}"
-
-        return TimelineEntry(
-            timestamp=timestamp,
-            platform=platform,
-            uid=uid,
-            platform_name=pname,
-            event_type="歌单歌曲变化",
-            summary=summary,
-            detail="",
-            time_str=time_str,
-            time_suffix=time_suffix,
-            time_range=time_range or {},
-            raw={"type": "song_change", "data": change},
         )
 
     @classmethod

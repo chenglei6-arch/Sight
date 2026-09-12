@@ -6,7 +6,7 @@ SQLite 数据存储
     - id          INTEGER PRIMARY KEY
     - platform    TEXT     (netease / bilibili / ...)
     - uid         TEXT     用户 ID
-    - data_type   TEXT     (profile / playlists / records / events / follows / playlist_songs)
+    - data_type   TEXT     (profile / playlists / records / events / follows)
     - data_json   TEXT     JSON 数据；标记快照格式为 {"_marker": true, "_hash": "..."}
     - created_at  TEXT     ISO 时间戳
 
@@ -153,7 +153,7 @@ class DataStore:
         Args:
             platform: 平台标识
             uid: 用户 ID
-            data_type: 数据类型 (profile / playlists / records / events / follows / playlist_songs)
+            data_type: 数据类型 (profile / playlists / records / events / follows)
             data: 数据字典
         """
         content_hash = self._compute_hash(data)
@@ -182,24 +182,6 @@ class DataStore:
             conn.commit()
 
     # ==================== 读取 ====================
-
-    def get_latest_snapshot(
-        self, platform: str, uid: str, data_type: str
-    ) -> Optional[dict]:
-        """获取最新的一份快照"""
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT data_json, created_at FROM snapshots "
-                "WHERE platform=? AND uid=? AND data_type=? "
-                "ORDER BY created_at DESC LIMIT 1",
-                (platform, uid, data_type),
-            ).fetchone()
-
-        if row:
-            data = json.loads(row["data_json"])
-            data["_snapshot_time"] = row["created_at"]
-            return data
-        return None
 
     def get_snapshots(
         self,
@@ -240,119 +222,6 @@ class DataStore:
             data["_snapshot_time"] = row["created_at"]
             result.append(data)
         return result
-
-    def get_all_tracked_users(self) -> list[dict]:
-        """获取所有被追踪过的用户"""
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT platform, uid FROM snapshots ORDER BY platform, uid"
-            ).fetchall()
-        return [{"platform": r["platform"], "uid": r["uid"]} for r in rows]
-
-    # ==================== 对比 ====================
-
-    def compare_snapshots(
-        self, platform: str, uid: str, data_type: str
-    ) -> dict:
-        """
-        对比最新两次快照，生成变化报告
-
-        Returns:
-            {
-                platform, uid, data_type,
-                latest_time, previous_time,
-                changes: [{field, old_value, new_value}, ...]
-            }
-        """
-        rows = self._connect().execute(
-            "SELECT data_json, created_at FROM snapshots "
-            "WHERE platform=? AND uid=? AND data_type=? "
-            "ORDER BY created_at DESC LIMIT 2",
-            (platform, uid, data_type),
-        ).fetchall()
-
-        if len(rows) < 2:
-            return {
-                "platform": platform,
-                "uid": uid,
-                "data_type": data_type,
-                "has_changes": False,
-                "reason": "insufficient_data" if not rows else "only_one_snapshot",
-                "snapshots_count": len(rows),
-            }
-
-        latest = json.loads(rows[0]["data_json"])
-        previous = json.loads(rows[1]["data_json"])
-
-        changes = []
-        self._diff_dict(latest, previous, "", changes)
-
-        return {
-            "platform": platform,
-            "uid": uid,
-            "data_type": data_type,
-            "has_changes": len(changes) > 0,
-            "latest_time": rows[0]["created_at"],
-            "previous_time": rows[1]["created_at"],
-            "changes": changes,
-        }
-
-    @staticmethod
-    def _diff_dict(new: dict, old: dict, prefix: str, changes: list):
-        """递归对比两个字典，记录变化"""
-        all_keys = set(new.keys()) | set(old.keys())
-        for key in all_keys:
-            if key.startswith("_"):
-                continue  # 跳过元数据字段
-            full_key = f"{prefix}.{key}" if prefix else key
-            new_val = new.get(key)
-            old_val = old.get(key)
-
-            if isinstance(new_val, dict) and isinstance(old_val, dict):
-                DataStore._diff_dict(new_val, old_val, full_key, changes)
-            elif isinstance(new_val, list) and isinstance(old_val, list):
-                if len(new_val) != len(old_val):
-                    changes.append({
-                        "field": full_key,
-                        "old_value": f"length={len(old_val)}",
-                        "new_value": f"length={len(new_val)}",
-                        "type": "list_length",
-                    })
-                # 对于简单元素列表，逐项对比
-                if new_val and old_val and isinstance(new_val[0], (str, int, float)):
-                    added = set(new_val) - set(old_val)
-                    removed = set(old_val) - set(new_val)
-                    if added:
-                        changes.append({
-                            "field": full_key,
-                            "type": "list_added",
-                            "added": list(added),
-                        })
-                    if removed:
-                        changes.append({
-                            "field": full_key,
-                            "type": "list_removed",
-                            "removed": list(removed),
-                        })
-            elif new_val != old_val:
-                changes.append({
-                    "field": full_key,
-                    "old_value": str(old_val),
-                    "new_value": str(new_val),
-                    "type": "changed",
-                })
-
-    # ==================== 清理 ====================
-
-    def clean_old_snapshots(self, keep_days: int = 90):
-        """清理超过指定天数的旧快照"""
-        cutoff = datetime.now(CST) - timedelta(days=keep_days)
-        cutoff_str = cutoff.isoformat(timespec="seconds")
-        with self._connect() as conn:
-            conn.execute(
-                "DELETE FROM snapshots WHERE created_at < ?", (cutoff_str,)
-            )
-            conn.commit()
 
     # ==================== 活动时间线持久化 ====================
 
@@ -1061,89 +930,6 @@ class DataStore:
         return {
             "has_data": len(rows) > 0,
             "latest_time": rows[-1]["created_at"],
-            "snapshots_count": len(rows),
-            "changes": changes,
-        }
-
-    # ==================== 歌单歌曲变化检测 ====================
-
-    def detect_playlist_song_changes(
-        self, platform: str, uid: str
-    ) -> dict:
-        """
-        对比今天所有 playlist_songs 快照（逐对比较），累积每次歌单内歌曲增减。
-
-        Returns:
-            changes: [{
-                playlist_id, playlist_title,
-                song_id, song_title, artist,
-                change_type: "song_added" | "song_removed",
-                time_range: {since, until}
-            }, ...]
-        """
-        rows = self._load_today_real_snapshots(platform, uid, "playlist_songs")
-
-        if len(rows) < 2:
-            return {"has_data": len(rows) > 0, "changes": [], "snapshots_count": len(rows)}
-
-        changes = []
-        for i in range(len(rows) - 1):
-            older = json.loads(rows[i]["data_json"])
-            newer = json.loads(rows[i + 1]["data_json"])
-
-            if older.get("fetching") or newer.get("fetching"):
-                continue
-
-            older_pls = older.get("playlists", {})
-            newer_pls = newer.get("playlists", {})
-
-            # 检查是否有差异
-            all_pl_ids = set(older_pls.keys()) | set(newer_pls.keys())
-            has_diff = False
-            for pl_id in all_pl_ids:
-                older_songs = {s.get("id", "") for s in older_pls.get(pl_id, {}).get("songs", [])}
-                newer_songs = {s.get("id", "") for s in newer_pls.get(pl_id, {}).get("songs", [])}
-                if older_songs != newer_songs:
-                    has_diff = True
-                    break
-
-            if not has_diff:
-                continue
-
-            time_range = {"since": rows[i]["created_at"], "until": rows[i + 1]["created_at"]}
-
-            for pl_id in all_pl_ids:
-                older_songs_map = {s.get("id", ""): s for s in older_pls.get(pl_id, {}).get("songs", [])}
-                newer_songs_map = {s.get("id", ""): s for s in newer_pls.get(pl_id, {}).get("songs", [])}
-                pl_info = newer_pls.get(pl_id, older_pls.get(pl_id, {}))
-
-                for sid in (set(newer_songs_map.keys()) - set(older_songs_map.keys())):
-                    song = newer_songs_map[sid]
-                    changes.append({
-                        "playlist_id": pl_id,
-                        "playlist_title": pl_info.get("title", ""),
-                        "song_id": sid,
-                        "song_title": song.get("title", ""),
-                        "artist": song.get("artist", ""),
-                        "change_type": "song_added",
-                        "time_range": time_range,
-                    })
-
-                for sid in (set(older_songs_map.keys()) - set(newer_songs_map.keys())):
-                    song = older_songs_map.get(sid, {})
-                    changes.append({
-                        "playlist_id": pl_id,
-                        "playlist_title": pl_info.get("title", ""),
-                        "song_id": sid,
-                        "song_title": song.get("title", "已移除"),
-                        "artist": song.get("artist", ""),
-                        "change_type": "song_removed",
-                        "time_range": time_range,
-                    })
-
-        return {
-            "has_data": len(rows) > 0,
-            "latest_time": rows[-1]["created_at"] if rows else None,
             "snapshots_count": len(rows),
             "changes": changes,
         }
