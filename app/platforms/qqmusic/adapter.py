@@ -534,6 +534,20 @@ class QQMusicAdapter(BasePlatformAdapter):
         return profile
 
     @staticmethod
+    def _decode_ssr_payload(raw: str) -> dict:
+        """解码 SSR 页面 __ssrFirstPageData__ 的双编码 JSON；失败抛 RuntimeError"""
+        try:
+            inner = json.loads('"' + raw + '"')
+            data = json.loads(inner)
+        except json.JSONDecodeError:
+            s = raw.replace('\\"', '"').replace('\\u002F', '/').replace('\\n', '')
+            try:
+                data = json.loads(s)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"[QQ音乐] SSR 数据解码失败: {e}") from e
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
     def _extract_js_string(html: str, var_name: str) -> str:
         """
         从 HTML 中提取 JS 字符串变量的值（正确处理转义引号）。
@@ -590,16 +604,7 @@ class QQMusicAdapter(BasePlatformAdapter):
             if not raw:
                 return None
 
-            # 解析双编码 JSON
-            try:
-                inner = json.loads('"' + raw + '"')
-                data = json.loads(inner)
-            except json.JSONDecodeError:
-                s = raw.replace('\\"', '"').replace('\\u002F', '/').replace('\\n', '')
-                try:
-                    data = json.loads(s)
-                except json.JSONDecodeError:
-                    return None
+            data = self._decode_ssr_payload(raw)
 
             home_data = data.get("homeData", {})
             page_data = home_data.get("data", {}) if isinstance(home_data, dict) else {}
@@ -680,15 +685,7 @@ class QQMusicAdapter(BasePlatformAdapter):
             if not raw:
                 return []
 
-            try:
-                inner = json.loads('"' + raw + '"')
-                data = json.loads(inner)
-            except json.JSONDecodeError:
-                s = raw.replace('\\"', '"').replace('\\u002F', '/').replace('\\n', '')
-                try:
-                    data = json.loads(s)
-                except json.JSONDecodeError:
-                    return []
+            data = self._decode_ssr_payload(raw)
 
             home_data = data.get("homeData", {})
             page_data = home_data.get("data", {}) if isinstance(home_data, dict) else {}
@@ -1074,8 +1071,7 @@ class QQMusicAdapter(BasePlatformAdapter):
             raw = self._extract_js_string(html, "__ssrFirstPageData__")
             if not raw:
                 return None
-            inner = json.loads('"' + raw + '"')
-            data = json.loads(inner)
+            data = self._decode_ssr_payload(raw)
             home_data = data.get("homeData", {})
             page_data = home_data.get("data", {}) if isinstance(home_data, dict) else {}
             info = page_data.get("Info", {}) if isinstance(page_data, dict) else {}
@@ -1098,95 +1094,52 @@ class QQMusicAdapter(BasePlatformAdapter):
         """
         获取用户的关注列表 (他关注了谁)。
 
-        支持分页查询。
         对于 encrypt_uin 用户，API 无法返回关注列表（需要真实 QQ 号），
         仅可通过 fcg_get_profile_homepage API 获取关注总数(已存入 profile.extra.follow_count)。
-        此处返回空列表，避免破坏快照持久化流程。
-        返回 (条目, 还有更多, 总数)
         """
-        uid = str(uid).strip()
-        if not uid:
-            return [], False, -1
-
-        # 解析真实 QQ 号
-        real_uin = self._resolve_real_uin(uid)
-        if not real_uin:
-            if uid.isdigit():
-                real_uin = uid
-            else:
-                # encrypt_uin: 平台限制无法查询列表（总数已存于 profile），返回空
-                try:
-                    fcg_stats = self._try_get_follow_count_via_fcg(uid)
-                    if fcg_stats and fcg_stats.get("follow", 0) > 0:
-                        print(f"[QQ音乐] 关注列表: {uid} 是加密用户，关注数 {fcg_stats['follow']}")
-                    else:
-                        ssr_count = self._try_get_ssr_count(uid, "FollowNum")
-                        if ssr_count is not None and ssr_count > 0:
-                            print(f"[QQ音乐] SSR 关注数: {ssr_count}")
-                except RuntimeError as e:
-                    print(f"[QQ音乐] 加密用户统计获取失败: {e}")
-                return [], False, -1
-
-        # 分页获取所有关注（start 从 skip 开始，支持增量续拉）
-        all_items = []
-        page_size = min(limit, 40)
-        start = skip
-        total = 0
-
-        while len(all_items) < limit:
-            data = self._fetch_follow_list(real_uin, start, page_size, is_listen=0)
-            total = data.get("total", 0)
-            items = data.get("list", [])
-            if not items:
-                break
-
-            for item in items:
-                if len(all_items) >= limit:
-                    break
-                all_items.append(self._parse_follow_item(item))
-
-            start += page_size
-            if start >= total or len(items) < page_size:
-                break
-
-        if all_items:
-            print(f"[QQ音乐] 关注列表: {len(all_items)} 人")
-        more = skip + len(all_items) < total
-        return all_items, more, total
+        return self._get_follow_list(uid, limit, skip, is_listen=0, kind="关注")
 
     def get_followers(self, uid: str, limit: int = 100, skip: int = 0) -> tuple:
         """
         获取用户的粉丝列表 (谁关注了他)。
 
-        支持分页查询。
-        对于 encrypt_uin 用户，API 无法返回粉丝列表（需要真实 QQ 号），
-        仅可通过 fcg API 获取粉丝总数(已存入 profile.extra.fan_count)。
-        此处返回空列表，避免破坏快照持久化流程。
-        注意: QQ 音乐的粉丝 API (is_listen=1) 服务端不稳定，大 V 用户会超时，
-        此时返回空列表，但粉丝数可从 fcg API 获取。
-        返回 (条目, 还有更多, 总数)
+        粉丝 API (is_listen=1) 服务端不稳定，大 V 用户可能超时，失败时抛 RuntimeError；
+        粉丝总数可从 fcg API 获取（profile.extra.fan_count）。
         """
+        return self._get_follow_list(uid, limit, skip, is_listen=1, kind="粉丝")
+
+    def _get_follow_list(self, uid: str, limit: int, skip: int, is_listen: int, kind: str) -> tuple:
+        """关注/粉丝列表共用分页逻辑（start 从 skip 开始，支持增量续拉）"""
         uid = str(uid).strip()
         if not uid:
             return [], False, -1
 
-        # 解析真实 QQ 号
+        # 解析真实 QQ 号；encrypt_uin 是平台限制（无法获取详细列表），返回空
         real_uin = self._resolve_real_uin(uid)
         if not real_uin:
             if uid.isdigit():
                 real_uin = uid
             else:
-                # encrypt_uin: 无法获取详细列表，返回空（粉丝数已存于 profile）
+                if kind == "关注":
+                    try:
+                        fcg_stats = self._try_get_follow_count_via_fcg(uid)
+                        if fcg_stats and fcg_stats.get("follow", 0) > 0:
+                            print(f"[QQ音乐] 关注列表: {uid} 是加密用户，关注数 {fcg_stats['follow']}")
+                        else:
+                            ssr_count = self._try_get_ssr_count(uid, "FollowNum")
+                            if ssr_count is not None and ssr_count > 0:
+                                print(f"[QQ音乐] SSR 关注数: {ssr_count}")
+                    except RuntimeError as e:
+                        print(f"[QQ音乐] 加密用户统计获取失败: {e}")
                 return [], False, -1
 
-        # 分页获取所有粉丝（start 从 skip 开始，支持增量续拉）
         all_items = []
         page_size = min(limit, 40)
         start = skip
         total = 0
 
         while len(all_items) < limit:
-            data = self._fetch_follow_list(real_uin, start, page_size, is_listen=1)
+            data = self._fetch_follow_list(real_uin, start, page_size, is_listen=is_listen)
             total = data.get("total", 0)
             items = data.get("list", [])
             if not items:
@@ -1202,6 +1155,6 @@ class QQMusicAdapter(BasePlatformAdapter):
                 break
 
         if all_items:
-            print(f"[QQ音乐] 粉丝列表: {len(all_items)} 人")
+            print(f"[QQ音乐] {kind}列表: {len(all_items)} 人")
         more = skip + len(all_items) < total
         return all_items, more, total

@@ -47,6 +47,7 @@ from flask import Blueprint, Response, jsonify, request
 from app.platforms import get_adapter, get_pool, list_platforms, reset_adapter, reset_pool
 from app.config import DEFAULT_TARGET_UID, DEFAULT_PLATFORM
 from app.data.store import DataStore
+from app.platforms.base import dataclass_to_dict
 from app.credentials import CredentialManager
 from app.services.log_hub import get_log_hub
 from app.services.social_expander import graph_user_node
@@ -851,7 +852,7 @@ def platform_all(platform):
             else:
                 profile = adapter.get_profile(uid)
                 if profile:
-                    profile_dict = _dataclass_to_dict(profile)
+                    profile_dict = dataclass_to_dict(profile)
                     result["profile"] = profile_dict
                     get_store().save_snapshot(platform, uid, "profile", profile_dict)
         except Exception as e:
@@ -880,7 +881,7 @@ def platform_all(platform):
                 print(f"[{platform}] /all playlists 命中新鲜快照({int(_snapshot_age(snap_pl) or 0)}s): {len(result['playlists'])} 项")
             else:
                 items = adapter.get_content_lists(uid)
-                item_dicts = [_dataclass_to_dict(i) for i in items]
+                item_dicts = [dataclass_to_dict(i) for i in items]
                 result["playlists"] = item_dicts
                 if item_dicts:
                     get_store().save_snapshot(platform, uid, "playlists", {
@@ -899,8 +900,8 @@ def platform_all(platform):
             if platform == "netease":
                 all_t = adapter.get_history(uid, "all")
                 weekly = adapter.get_history(uid, "week")
-                all_data = [_dataclass_to_dict(e) for e in all_t]
-                week_data = [_dataclass_to_dict(e) for e in weekly]
+                all_data = [dataclass_to_dict(e) for e in all_t]
+                week_data = [dataclass_to_dict(e) for e in weekly]
                 result["records"] = {"allTime": all_data, "weekly": week_data}
                 if all_data or week_data:
                     get_store().save_snapshot(platform, uid, "records", {
@@ -932,7 +933,7 @@ def platform_all(platform):
                 print(f"[{platform}] /all events 命中新鲜快照({int(_snapshot_age(snap_ev) or 0)}s): {len(result['events'])} 条")
             else:
                 events = adapter.get_events(uid)
-                event_dicts = [_dataclass_to_dict(e) for e in events]
+                event_dicts = [dataclass_to_dict(e) for e in events]
                 result["events"] = event_dicts
                 if event_dicts:
                     get_store().save_snapshot(platform, uid, "events", {
@@ -1197,29 +1198,3 @@ def delete_timeline_entry(entry_id):
             return _error("条目不存在", http_status=404)
     except Exception as e:
         return _error(str(e))
-
-
-# ==================== 辅助函数 ====================
-
-def _dataclass_to_dict(obj) -> dict:
-    """将 dataclass 对象转为字典"""
-    if hasattr(obj, "__dataclass_fields__"):
-        result = {}
-        for field_name in obj.__dataclass_fields__:
-            value = getattr(obj, field_name)
-            if hasattr(value, "__dataclass_fields__"):
-                result[field_name] = _dataclass_to_dict(value)
-            elif isinstance(value, list):
-                result[field_name] = [
-                    _dataclass_to_dict(v) if hasattr(v, "__dataclass_fields__") else v
-                    for v in value
-                ]
-            elif isinstance(value, dict):
-                result[field_name] = {
-                    k: _dataclass_to_dict(v) if hasattr(v, "__dataclass_fields__") else v
-                    for k, v in value.items()
-                }
-            else:
-                result[field_name] = value
-        return result
-    return obj

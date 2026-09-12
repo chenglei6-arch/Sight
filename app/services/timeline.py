@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from app.platforms import get_adapter
 from app.data.store import DataStore
+from app.platforms.base import dataclass_to_dict
 
 CST = timezone(timedelta(hours=8))
 
@@ -117,33 +118,6 @@ class TimelineBuilder:
         "genshin": "角色",
     }
 
-    @staticmethod
-    def _quicksort(arr: list, key, reverse: bool = False):
-        """三路快排，按 key 函数取值排序。稳定 O(n log n)，原地操作。"""
-        if len(arr) <= 1:
-            return arr
-
-        import random
-        pivot = key(random.choice(arr))
-        lt, eq, gt = [], [], []
-        for item in arr:
-            k = key(item)
-            if k < pivot:
-                lt.append(item)
-            elif k > pivot:
-                gt.append(item)
-            else:
-                eq.append(item)
-
-        TimelineBuilder._quicksort(lt, key, reverse)
-        TimelineBuilder._quicksort(gt, key, reverse)
-
-        if reverse:
-            arr[:] = gt + eq + lt
-        else:
-            arr[:] = lt + eq + gt
-        return arr
-
     @classmethod
     def build(
         cls,
@@ -232,7 +206,7 @@ class TimelineBuilder:
                                 detail=ev.content,
                                 time_str=time_str,
                                 time_suffix="",
-                                raw={"type": "event", "data": _to_dict(ev)},
+                                raw={"type": "event", "data": dataclass_to_dict(ev)},
                             ))
                             event_count += 1
                         platform_count += event_count
@@ -359,7 +333,7 @@ class TimelineBuilder:
                             if entry.time_range:
                                 inferred.append(entry)
 
-                        cls._quicksort(inferred, key=lambda e: e.timestamp, reverse=True)
+                        inferred.sort(key=lambda e: e.timestamp, reverse=True)
                         entries.extend(inferred)
                         platform_count += len(inferred)
                         print(f"[Timeline] {platform_id}:{uid} 听歌记录加入 {len(inferred)} 条")
@@ -413,7 +387,7 @@ class TimelineBuilder:
         print(f"[Timeline] 合计 {len(entries)} 条，来自 {list(platform_uids.keys())}")
 
         # 按时间戳倒序排列
-        cls._quicksort(entries, key=lambda e: e.timestamp, reverse=True)
+        entries.sort(key=lambda e: e.timestamp, reverse=True)
         return entries
 
     @classmethod
@@ -527,166 +501,95 @@ class TimelineBuilder:
             raw={"type": "record_change", "data": change},
         )
 
-    @classmethod
-    def _build_follow_entry(
-        cls, platform: str, uid: str, pname: str, change: dict
-    ) -> TimelineEntry:
-        """根据关注变化构建时间线条目"""
-        nickname = change.get("nickname", "")
-        change_type = change.get("change_type", "new_follow")
-        time_range = change.get("time_range")
-
-        since_str = time_range.get("since", "") if time_range else ""
-        until_str = time_range.get("until", "") if time_range else ""
-
-        since_readable = cls._iso_to_readable(since_str)
-        until_readable = cls._iso_to_readable(until_str)
-
-        try:
-            dt_until = datetime.fromisoformat(until_str) if until_str else None
-            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
-            time_str = until_readable
-        except (ValueError, TypeError):
-            timestamp = 0
-            time_str = ""
-
-        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
-
-        if change_type == "new_follow":
-            summary = f"[{pname}] 关注了 {nickname}"
-            detail = ""
-        elif change_type == "unfollow":
-            summary = f"[{pname}] 取关了 {nickname}"
-            detail = ""
-        else:
-            summary = f"[{pname}] 关注变化: {nickname}"
-            detail = ""
-
-        return TimelineEntry(
-            timestamp=timestamp,
-            platform=platform,
-            uid=uid,
-            platform_name=pname,
-            event_type="关注变化",
-            summary=summary,
-            detail=detail,
-            time_str=time_str,
-            time_suffix=time_suffix,
-            time_range=time_range or {},
-            raw={"type": "follow_change", "data": change},
-        )
+    # 关注/粉丝/内容列表变化的通用构建配置
+    _SET_ENTRY_SPECS = {
+        "follow": {
+            "event_type": "关注变化", "raw_type": "follow_change", "field": "nickname",
+            "summaries": {"new_follow": "关注了 {x}", "unfollow": "取关了 {x}"},
+            "fallback": "关注变化: {x}",
+        },
+        "follower": {
+            "event_type": "粉丝变化", "raw_type": "follower_change", "field": "nickname",
+            "summaries": {"new_follower": "被 {x} 关注", "lost_follower": "{x} 取消了关注"},
+            "fallback": "粉丝变化: {x}",
+        },
+        "playlist": {
+            "event_type": "内容变化", "raw_type": "playlist_change", "field": "title",
+        },
+    }
 
     @classmethod
-    def _build_follower_entry(
-        cls, platform: str, uid: str, pname: str, change: dict
-    ) -> TimelineEntry:
-        """根据粉丝变化构建时间线条目"""
-        nickname = change.get("nickname", "")
-        change_type = change.get("change_type", "new_follower")
-        time_range = change.get("time_range")
-
-        since_str = time_range.get("since", "") if time_range else ""
-        until_str = time_range.get("until", "") if time_range else ""
-
-        since_readable = cls._iso_to_readable(since_str)
-        until_readable = cls._iso_to_readable(until_str)
-
-        try:
-            dt_until = datetime.fromisoformat(until_str) if until_str else None
-            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
-            time_str = until_readable
-        except (ValueError, TypeError):
-            timestamp = 0
-            time_str = ""
-
-        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
-
-        if change_type == "new_follower":
-            summary = f"[{pname}] 被 {nickname} 关注"
-            detail = ""
-        elif change_type == "lost_follower":
-            summary = f"[{pname}] {nickname} 取消了关注"
-            detail = ""
-        else:
-            summary = f"[{pname}] 粉丝变化: {nickname}"
-            detail = ""
-
-        return TimelineEntry(
-            timestamp=timestamp,
-            platform=platform,
-            uid=uid,
-            platform_name=pname,
-            event_type="粉丝变化",
-            summary=summary,
-            detail=detail,
-            time_str=time_str,
-            time_suffix=time_suffix,
-            time_range=time_range or {},
-            raw={"type": "follower_change", "data": change},
-        )
-
-    @classmethod
-    def _build_playlist_entry(
-        cls, platform: str, uid: str, pname: str, change: dict
-    ) -> TimelineEntry:
-        """根据歌单/内容列表变化构建时间线条目"""
-        title = change.get("title", "")
-        change_type = change.get("change_type", "new_playlist")
-        time_range = change.get("time_range")
-        is_owner = change.get("is_owner", True)
-
-        since_str = time_range.get("since", "") if time_range else ""
-        until_str = time_range.get("until", "") if time_range else ""
-
-        since_readable = cls._iso_to_readable(since_str)
-        until_readable = cls._iso_to_readable(until_str)
-
-        try:
-            dt_until = datetime.fromisoformat(until_str) if until_str else None
-            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
-            time_str = until_readable
-        except (ValueError, TypeError):
-            timestamp = 0
-            time_str = ""
-
-        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
-
-        # 按平台定制动作描述
+    def _playlist_action(cls, platform: str, change_type: str, is_owner: bool) -> str:
+        """按平台定制内容变化的动作描述"""
+        verbs = {"netease": "歌单", "bilibili": "视频", "douyin": "作品"}
+        noun = verbs.get(platform, "")
         if change_type == "removed_playlist":
-            if platform == "netease":
-                action = "移除了歌单"
-            elif platform == "bilibili":
-                action = "删除了视频"
-            elif platform == "douyin":
-                action = "删除了作品"
-            else:
-                action = "删除了"
-        else:
-            if platform == "netease":
-                action = "创建了歌单" if is_owner else "收藏了歌单"
-            elif platform == "bilibili":
-                action = "发布了视频" if is_owner else "收藏了视频"
-            elif platform == "douyin":
-                action = "发布了作品" if is_owner else "收藏了作品"
-            else:
-                action = "新增了"
+            return ("移除了歌单" if platform == "netease" else
+                    f"删除了{noun}" if noun else "删除了")
+        return (f"{'创建了' if is_owner else '收藏了'}歌单" if platform == "netease"
+                else f"{'发布了' if is_owner else '收藏了'}{noun}" if noun else "新增了")
 
-        summary = f"[{pname}] {action}《{title}》"
-        detail = ""
+    @classmethod
+    def _build_set_entry(
+        cls, kind: str, platform: str, uid: str, pname: str, change: dict
+    ) -> TimelineEntry:
+        """通用集合类变化条目构建：取 until 时间为事件时间，拼装动作摘要"""
+        spec = cls._SET_ENTRY_SPECS[kind]
+        change_type = change.get("change_type", "")
+        time_range = change.get("time_range")
+
+        since_str = time_range.get("since", "") if time_range else ""
+        until_str = time_range.get("until", "") if time_range else ""
+
+        since_readable = cls._iso_to_readable(since_str)
+        until_readable = cls._iso_to_readable(until_str)
+
+        try:
+            dt_until = datetime.fromisoformat(until_str) if until_str else None
+            timestamp = int(dt_until.timestamp() * 1000) if dt_until else 0
+            time_str = until_readable
+        except (ValueError, TypeError):
+            timestamp = 0
+            time_str = ""
+
+        time_suffix = f"{since_readable} ~ {until_readable}" if since_readable and until_readable else ""
+
+        x = change.get(spec["field"], "")
+        if kind == "playlist":
+            action = cls._playlist_action(platform, change_type or "new_playlist", change.get("is_owner", True))
+            summary = f"[{pname}] {action}《{x}》"
+        else:
+            template = spec["summaries"].get(change_type, spec["fallback"])
+            summary = f"[{pname}] " + template.format(x=x)
 
         return TimelineEntry(
             timestamp=timestamp,
             platform=platform,
             uid=uid,
             platform_name=pname,
-            event_type="内容变化",
+            event_type=spec["event_type"],
             summary=summary,
-            detail=detail,
+            detail="",
             time_str=time_str,
             time_suffix=time_suffix,
             time_range=time_range or {},
-            raw={"type": "playlist_change", "data": change},
+            raw={"type": spec["raw_type"], "data": change},
         )
+
+    @classmethod
+    def _build_follow_entry(cls, platform, uid, pname, change):
+        """根据关注变化构建时间线条目"""
+        return cls._build_set_entry("follow", platform, uid, pname, change)
+
+    @classmethod
+    def _build_follower_entry(cls, platform, uid, pname, change):
+        """根据粉丝变化构建时间线条目"""
+        return cls._build_set_entry("follower", platform, uid, pname, change)
+
+    @classmethod
+    def _build_playlist_entry(cls, platform, uid, pname, change):
+        """根据歌单/内容列表变化构建时间线条目"""
+        return cls._build_set_entry("playlist", platform, uid, pname, change)
 
     @classmethod
     def _iso_to_readable(cls, iso_str: str) -> str:
@@ -788,25 +691,3 @@ class TimelineBuilder:
             return f"{prefix} {action}"
 
 
-def _to_dict(obj) -> dict:
-    """dataclass → dict"""
-    if hasattr(obj, "__dataclass_fields__"):
-        result = {}
-        for key in obj.__dataclass_fields__:
-            val = getattr(obj, key)
-            if hasattr(val, "__dataclass_fields__"):
-                result[key] = _to_dict(val)
-            elif isinstance(val, list):
-                result[key] = [
-                    _to_dict(v) if hasattr(v, "__dataclass_fields__") else v
-                    for v in val
-                ]
-            elif isinstance(val, dict):
-                result[key] = {
-                    k: _to_dict(v) if hasattr(v, "__dataclass_fields__") else v
-                    for k, v in val.items()
-                }
-            else:
-                result[key] = val
-        return result
-    return obj

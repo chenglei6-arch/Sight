@@ -714,22 +714,29 @@ class DataStore:
                     groups[key] = ch
         return list(groups.values())
 
-    # ==================== 粉丝变化检测 ====================
+    # ==================== 通用集合类变化检测（关注/粉丝/内容列表） ====================
 
-    def detect_follower_changes(
-        self, platform: str, uid: str
+    def _detect_set_changes(
+        self,
+        platform: str,
+        uid: str,
+        data_type: str,
+        id_keys: tuple,
+        out_id_key: str,
+        added_type: str,
+        removed_type: str,
+        field_map: dict,
+        removed_defaults: dict,
     ) -> dict:
         """
-        对比今天所有 followers 快照（逐对比较），累积每次粉丝增减变化。
+        对比今天所有 data_type 快照（逐对比较），按条目 id 集合差异累积增减变化。
 
-        Returns:
-            {
-                has_data, latest_time, previous_time,
-                changes: [{follower_uid, nickname, avatar, change_type, time_range}, ...]
-            }
-            change_type: "new_follower" | "lost_follower"
+        id_keys: 条目 id 字段候选（依次取第一个非空值，如 ("item_id", "id")）
+        out_id_key: 变化条目里承载 id 的字段名
+        field_map: {输出字段: (来源字段候选元组, 缺省值)}
+        removed_defaults: removed 条目里对缺失字段的覆盖缺省（如 title="已删除"）
         """
-        rows = self._load_today_real_snapshots(platform, uid, "followers")
+        rows = self._load_today_real_snapshots(platform, uid, data_type)
 
         if len(rows) < 2:
             return {
@@ -737,6 +744,20 @@ class DataStore:
                 "changes": [],
                 "snapshots_count": len(rows),
             }
+
+        def entry_id(item: dict) -> str:
+            for key in id_keys:
+                v = item.get(key, "")
+                if v not in (None, ""):
+                    return str(v)
+            return ""
+
+        def pick(item: dict, candidates, default):
+            for key in candidates:
+                v = item.get(key)
+                if v not in (None, ""):
+                    return v
+            return default
 
         changes = []
         for i in range(len(rows) - 1):
@@ -746,181 +767,31 @@ class DataStore:
             older_items = older.get("items", [])
             newer_items = newer.get("items", [])
 
-            older_uids = {str(f.get("uid", "")) for f in older_items}
-            newer_uids = {str(f.get("uid", "")) for f in newer_items}
-
-            if newer_uids == older_uids:
-                continue
-
-            newer_detail = {str(f.get("uid", "")): f for f in newer_items}
-            older_detail = {str(f.get("uid", "")): f for f in older_items}
-            time_range = {"since": rows[i]["created_at"], "until": rows[i + 1]["created_at"]}
-
-            for fuid in (newer_uids - older_uids):
-                user = newer_detail[fuid]
-                changes.append({
-                    "follower_uid": fuid,
-                    "nickname": user.get("nickname", ""),
-                    "avatar": user.get("avatarUrl", ""),
-                    "signature": user.get("signature", ""),
-                    "change_type": "new_follower",
-                    "time_range": time_range,
-                })
-
-            for fuid in (older_uids - newer_uids):
-                user = older_detail.get(fuid, {})
-                changes.append({
-                    "follower_uid": fuid,
-                    "nickname": user.get("nickname", "已离开用户"),
-                    "avatar": user.get("avatarUrl", ""),
-                    "signature": user.get("signature", ""),
-                    "change_type": "lost_follower",
-                    "time_range": time_range,
-                })
-
-        return {
-            "has_data": len(rows) > 0,
-            "latest_time": rows[-1]["created_at"],
-            "snapshots_count": len(rows),
-            "changes": changes,
-        }
-
-    # ==================== 关注变化检测 ====================
-
-    def detect_follow_changes(
-        self, platform: str, uid: str
-    ) -> dict:
-        """
-        对比今天所有 follows 快照（逐对比较），累积每次关注/取关变化。
-
-        Returns:
-            {
-                has_data, latest_time, previous_time,
-                changes: [{follow_uid, nickname, avatar, change_type, time_range}, ...]
-            }
-            change_type: "new_follow" | "unfollow"
-        """
-        rows = self._load_today_real_snapshots(platform, uid, "follows")
-
-        if len(rows) < 2:
-            return {
-                "has_data": len(rows) > 0,
-                "changes": [],
-                "snapshots_count": len(rows),
-            }
-
-        changes = []
-        for i in range(len(rows) - 1):
-            older = json.loads(rows[i]["data_json"])
-            newer = json.loads(rows[i + 1]["data_json"])
-
-            older_items = older.get("items", [])
-            newer_items = newer.get("items", [])
-
-            older_uids = {str(f.get("uid", "")) for f in older_items}
-            newer_uids = {str(f.get("uid", "")) for f in newer_items}
-
-            if newer_uids == older_uids:
-                continue
-
-            newer_detail = {str(f.get("uid", "")): f for f in newer_items}
-            older_detail = {str(f.get("uid", "")): f for f in older_items}
-            time_range = {"since": rows[i]["created_at"], "until": rows[i + 1]["created_at"]}
-
-            for fuid in (newer_uids - older_uids):
-                user = newer_detail[fuid]
-                changes.append({
-                    "follow_uid": fuid,
-                    "nickname": user.get("nickname", ""),
-                    "avatar": user.get("avatarUrl", ""),
-                    "signature": user.get("signature", ""),
-                    "change_type": "new_follow",
-                    "time_range": time_range,
-                })
-
-            for fuid in (older_uids - newer_uids):
-                user = older_detail.get(fuid, {})
-                changes.append({
-                    "follow_uid": fuid,
-                    "nickname": user.get("nickname", "已取关用户"),
-                    "avatar": user.get("avatarUrl", ""),
-                    "signature": user.get("signature", ""),
-                    "change_type": "unfollow",
-                    "time_range": time_range,
-                })
-
-        return {
-            "has_data": len(rows) > 0,
-            "latest_time": rows[-1]["created_at"],
-            "snapshots_count": len(rows),
-            "changes": changes,
-        }
-
-    # ==================== 歌单/内容列表变化检测 ====================
-
-    def detect_playlist_changes(
-        self, platform: str, uid: str
-    ) -> dict:
-        """
-        对比今天所有 playlists 快照（逐对比较），累积每次歌单/内容变化。
-
-        Returns:
-            {
-                has_data, latest_time, previous_time,
-                changes: [{item_id, title, creator, change_type, time_range}, ...]
-            }
-            change_type: "new_playlist" | "removed_playlist"
-        """
-        rows = self._load_today_real_snapshots(platform, uid, "playlists")
-
-        if len(rows) < 2:
-            return {
-                "has_data": len(rows) > 0,
-                "changes": [],
-                "snapshots_count": len(rows),
-            }
-
-        changes = []
-        for i in range(len(rows) - 1):
-            older = json.loads(rows[i]["data_json"])
-            newer = json.loads(rows[i + 1]["data_json"])
-
-            older_items = older.get("items", [])
-            newer_items = newer.get("items", [])
-
-            older_ids = {str(it.get("item_id", it.get("id", ""))) for it in older_items}
-            newer_ids = {str(it.get("item_id", it.get("id", ""))) for it in newer_items}
+            older_ids = {entry_id(f) for f in older_items}
+            newer_ids = {entry_id(f) for f in newer_items}
 
             if newer_ids == older_ids:
                 continue
 
-            newer_detail = {str(it.get("item_id", it.get("id", ""))): it for it in newer_items}
-            older_detail = {str(it.get("item_id", it.get("id", ""))): it for it in older_items}
+            older_detail = {entry_id(f): f for f in older_items}
+            newer_detail = {entry_id(f): f for f in newer_items}
             time_range = {"since": rows[i]["created_at"], "until": rows[i + 1]["created_at"]}
 
-            for pid in (newer_ids - older_ids):
-                item = newer_detail[pid]
-                changes.append({
-                    "item_id": pid,
-                    "title": item.get("title", item.get("name", "")),
-                    "creator": item.get("creator", ""),
-                    "cover_url": item.get("cover_url", item.get("coverImgUrl", "")),
-                    "is_owner": item.get("is_owner", True),
-                    "change_type": "new_playlist",
-                    "time_range": time_range,
-                })
+            for cid in (newer_ids - older_ids):
+                item = newer_detail[cid]
+                change = {out_id_key: cid, "change_type": added_type}
+                for out_key, (candidates, default) in field_map.items():
+                    change[out_key] = pick(item, candidates, default)
+                change["time_range"] = time_range
+                changes.append(change)
 
-            for pid in (older_ids - newer_ids):
-                item = older_detail.get(pid, {})
-                changes.append({
-                    "item_id": pid,
-                    "title": item.get("title", item.get("name", "已删除")),
-                    "creator": item.get("creator", ""),
-                    "cover_url": item.get("cover_url", item.get("coverImgUrl", "")),
-                    "is_owner": item.get("is_owner", True),
-                    "change_type": "removed_playlist",
-                    "time_range": time_range,
-                })
+            for cid in (older_ids - newer_ids):
+                item = older_detail.get(cid, {})
+                change = {out_id_key: cid, "change_type": removed_type}
+                for out_key, (candidates, default) in field_map.items():
+                    change[out_key] = pick(item, candidates, removed_defaults.get(out_key, default))
+                change["time_range"] = time_range
+                changes.append(change)
 
         return {
             "has_data": len(rows) > 0,
@@ -928,3 +799,49 @@ class DataStore:
             "snapshots_count": len(rows),
             "changes": changes,
         }
+
+    # ==================== 变化检测对外接口 ====================
+
+    def detect_follow_changes(self, platform: str, uid: str) -> dict:
+        """关注变化（new_follow / unfollow），字段见 _detect_set_changes"""
+        return self._detect_set_changes(
+            platform, uid, "follows",
+            id_keys=("uid",), out_id_key="follow_uid",
+            added_type="new_follow", removed_type="unfollow",
+            field_map={
+                "nickname": (("nickname",), ""),
+                "avatar": (("avatarUrl",), ""),
+                "signature": (("signature",), ""),
+            },
+            removed_defaults={"nickname": "已取关用户"},
+        )
+
+    def detect_follower_changes(self, platform: str, uid: str) -> dict:
+        """粉丝变化（new_follower / lost_follower）"""
+        return self._detect_set_changes(
+            platform, uid, "followers",
+            id_keys=("uid",), out_id_key="follower_uid",
+            added_type="new_follower", removed_type="lost_follower",
+            field_map={
+                "nickname": (("nickname",), ""),
+                "avatar": (("avatarUrl",), ""),
+                "signature": (("signature",), ""),
+            },
+            removed_defaults={"nickname": "已离开用户"},
+        )
+
+    def detect_playlist_changes(self, platform: str, uid: str) -> dict:
+        """内容列表变化（new_playlist / removed_playlist）"""
+        return self._detect_set_changes(
+            platform, uid, "playlists",
+            id_keys=("item_id", "id"), out_id_key="item_id",
+            added_type="new_playlist", removed_type="removed_playlist",
+            field_map={
+                "title": (("title", "name"), ""),
+                "creator": (("creator",), ""),
+                "cover_url": (("cover_url", "coverImgUrl"), ""),
+                "is_owner": (("is_owner",), True),
+            },
+            removed_defaults={"title": "已删除"},
+        )
+

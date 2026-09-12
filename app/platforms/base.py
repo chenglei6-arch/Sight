@@ -70,6 +70,27 @@ class EventItem:
     extra: dict = field(default_factory=dict)
 
 
+def dataclass_to_dict(obj):
+    """递归把 dataclass（含嵌套 dataclass/list/dict）转为纯 dict"""
+    if hasattr(obj, "__dataclass_fields__"):
+        result = {}
+        for key in obj.__dataclass_fields__:
+            val = getattr(obj, key)
+            if hasattr(val, "__dataclass_fields__"):
+                result[key] = dataclass_to_dict(val)
+            elif isinstance(val, list):
+                result[key] = [dataclass_to_dict(v) if hasattr(v, "__dataclass_fields__") else v for v in val]
+            elif isinstance(val, dict):
+                result[key] = {
+                    k: dataclass_to_dict(v) if hasattr(v, "__dataclass_fields__") else v
+                    for k, v in val.items()
+                }
+            else:
+                result[key] = val
+        return result
+    return obj
+
+
 class BasePlatformAdapter(ABC):
     """
     平台适配器抽象基类
