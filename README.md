@@ -64,7 +64,7 @@ GET  /api/logs/stream?after=seq              SSE 实时日志流（stdout/stderr
 GET  /api/graph/expand/status                各平台展开队列状态（排队/执行/熔断/账号数）
 ```
 
-完整接口和平台限制见 [`docs/`](docs/)；小红书说明见 [`docs/XHS_QUICKSTART.md`](docs/XHS_QUICKSTART.md)。
+完整接口和平台限制见 [`docs/`](docs/)；小红书说明见 [`docs/XHS.md`](docs/XHS.md)。
 
 ## 前端开发
 
@@ -81,7 +81,7 @@ npm run build     # 构建到 app/web/，由 Flask 托管
 app/platforms/    平台适配器和数据模型
 app/routes/       Flask API 路由
 app/data/         快照存储和变化检测
-app/services/     采集器、时间线和报告服务
+app/services/     时间线、社交展开队列、日志中枢等服务
 frontend/         Vue 3 + Vite 源码
 credentials/      本地 Cookie（忽略）
 data/             SQLite 数据库（忽略）
@@ -91,6 +91,9 @@ docs/             详细说明
 
 ## 相关文档
 
-- [`docs/workflow.md`](docs/workflow.md)：开发和接入流程
-- [`docs/platforms.md`](docs/platforms.md)：平台实现说明
-- [`docs/XHS_INTEGRATION.md`](docs/XHS_INTEGRATION.md)：小红书集成细节
+- [`docs/project_overview.md`](docs/project_overview.md)：项目架构总览
+- [`docs/platforms.md`](docs/platforms.md)：各平台实现方式与坑
+- [`docs/workflow.md`](docs/workflow.md)：接入新平台的完整清单
+- [`docs/UPSTREAM_SYNC.md`](docs/UPSTREAM_SYNC.md)：移植模块上游仓库与同步约定
+- [`docs/XHS.md`](docs/XHS.md)：小红书 Cookie 配置与限制
+- [`docs/qqmusic_research.md`](docs/qqmusic_research.md)：QQ音乐 API 研究笔记

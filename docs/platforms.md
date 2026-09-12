@@ -1,368 +1,93 @@
-# 抖音 & QQ音乐平台适配器文档
-
-## 目录
-1. [概述](#概述)
-2. [抖音平台适配器](#抖音平台适配器)
-3. [QQ音乐平台适配器](#qq音乐平台适配器)
-4. [配置指南](#配置指南)
-5. [API参考](#api参考)
-6. [常见问题](#常见问题)
-
----
-
-## 概述
-
-本项目 `workshop13-sight` 是一个多平台用户数据监控面板，支持以下平台：
-
-| 平台 | 标识 | 核心功能 | 状态 |
-|------|------|----------|------|
-| 网易云音乐 | `netease` | 资料/歌单/排行/动态/关注 | ✅ 稳定 |
-| 哔哩哔哩 | `bilibili` | 资料/投稿/动态/关注/粉丝 | ✅ 稳定 |
-| **抖音** | `douyin` | 资料/作品/关注/粉丝/动态 | ✅ 已完善 |
-| **QQ音乐** | `qqmusic` | 资料/歌单/动态/排行 | ✅ 新增 |
-
----
-
-## 抖音平台适配器
-
-### 文件结构
-
-```
-app/platforms/douyin/
-├── __init__.py          # 模块初始化, 导出 DouyinAdapter
-├── adapter.py           # 主适配器 (SSR + API 双策略)
-├── abogus.py            # a_bogus 签名生成 (JS 方案 + 纯 Python 降级)
-├── abogus_pure.py       # 纯 Python a_bogus (实验性)
-├── douyin_sign.js       # a_bogus 签名 JS 源码
-└── data/
-    ├── FIXED_keystream.json    # RC4 密钥流
-    └── time_mapping_sample.json # 时间戳映射表 (100 样本)
-```
-
-### 核心策略
-
-适配器采用 **SSR优先 + API兜底** 的双策略架构：
-
-1. **SSR RENDER_DATA** (优先)
-   - 从抖音页面 HTML 的 `<script id="RENDER_DATA">` 提取内嵌 JSON 数据
-   - **无需 a_bogus 签名**, 成功率较高
-   - 适用于: 用户资料, 作品列表, 登录用户信息
-
-2. **API + a_bogus** (兜底)
-   - 通过 Node.js 执行 `douyin_sign.js` 生成 a_bogus 签名
-   - 需要有效 Cookie (sessionid)
-   - 适用于: 搜索, 关注/粉丝列表, 作品详情
-
-### a_bogus 签名机制
-
-a_bogus 是抖音 Web API 的反爬签名参数，生成流程：
-
-1. 对 URL 查询参数做两次 SM3 哈希
-2. 对 User-Agent 做 RC4 加密 → Base64 变种编码 → SM3 哈希
-3. 组装 29 字节数组 (含时间戳,哈希片段,XOR校验)
-4. 字节重排 → RC4 再加密 → Base64 变种编码
-
-**实现方式**: 通过 PyExecJS 调用 Node.js 执行 `douyin_sign.js`，若 Node.js 不可用则降级到纯 Python 方案。
-
-### 依赖项
-
-- Node.js (v14+, 用于 a_bogus 签名)
-- PyExecJS (`pip install pyexecjs`)
-
-### 主要方法
-
-| 方法 | 功能 | 数据来源 |
-|------|------|----------|
-| `check_alive()` | 检查 Cookie 有效性 | 首页 HTML |
-| `get_login_user()` | 获取当前登录用户 | SSR + self API |
-| `get_profile(uid)` | 获取用户资料 | SSR + /profile/other/ API |
-| `search_user(keyword)` | 搜索用户 | API + SSR + 直接查询 |
-| `get_content_lists(uid)` | 获取作品列表 | SSR + /aweme/post/ API |
-| `get_content_detail(item_id)` | 获取作品详情 | /aweme/detail/ API |
-| `get_follows(uid)` | 获取关注列表 | /following/list/ API |
-| `get_followers(uid)` | 获取粉丝列表 | /follower/list/ API |
-| `get_events(uid)` | 获取用户动态 | 基于作品列表 |
-
-### 已知限制
-
-1. **搜索功能受限**: 抖音 Web 搜索对未登录/新登录用户有严格限制，API 搜索可能返回空结果
-2. **作品数量**: SSR 初始加载约 30 个作品，API 翻页最多 100 个
-3. **Cookie 有效期**: sessionid 约 7 天过期，需定期更新
-4. **反爬机制**: 频繁请求可能触发风控 (HTTP 429/403)
-
-### 使用示例
-
-```python
-from app.platforms.douyin.adapter import DouyinAdapter
-
-adapter = DouyinAdapter()
-profile = adapter.get_profile("MS4wLjABAAAA...")  # sec_uid 或数字 UID
-print(f"用户: {profile.nickname}")
-print(f"粉丝: {profile.extra.get('follower_count')}")
-```
-
----
-
-## QQ音乐平台适配器
-
-### 文件结构
-
-```
-app/platforms/qqmusic/
-├── __init__.py     # 模块初始化, 导出 QQMusicAdapter
-└── adapter.py      # 主适配器
-```
-
-### API 概述
-
-QQ 音乐的 API 主要集中在 `c.y.qq.com` 域名下：
-
-| API 端点 | 功能 | 是否需要登录 |
-|----------|------|-------------|
-| `u.y.qq.com/cgi-bin/musicu.fcg` | 通用搜索网关 (search_type=8) | 需 Cookie |
-| `splcloud/fcgi-bin/smartbox_new.fcg` | **智能搜索/自动补全 (获取歌手)** | **否** |
-| `soso/fcgi-bin/client_search_cp` | 客户端搜索 (歌曲/歌手) | 否 |
-| `rsc/fcgi-bin/fcg_get_profile_homepage.fcg` | 用户主页/歌单 | 否(基础) |
-| `qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg` | 歌单详情(含歌曲) | 否 |
-| `musichall/fcgi-bin/fcg_yqqhomepagerecommend.fcg` | 首页推荐 | 否 |
-| `splcloud/fcgi-bin/friend_follow_or_listen_list.fcg` | 关注/粉丝列表 | 否(关注) / 需 Cookie(粉丝) |
-| `i.y.qq.com/n2/m/share/profile_v2/index.html` | 用户资料 SSR 页面 | 否(需 curl 降级) |
-
-### 关键机制
-
-1. **g_tk 鉴权**: 从 Cookie 的 `skey` / `p_skey` 计算，新版本使用 `qqmusic_key` / `qm_keyst` 代替，未登录默认 `5381`
-2. **防盗链**: 需要 `Referer: https://y.qq.com` 请求头
-3. **JSONP 处理**: 自动检测并解析 JSONP 格式响应
-4. **用户标识**: 使用 QQ 号 (`uin`) 作为用户 ID，或使用 `singer_mid` 标识歌手
-5. **通用网关**: `u.y.qq.com/cgi-bin/musicu.fcg` 统一 POST 网关，`comm` 块自动注入 `g_tk`、`uin`、`format` 等公共参数
-6. **web scraping**: 新版页面使用 SSR，数据通过 `window.__INITIAL_DATA__` 注入 HTML
-
-### 搜索策略 (多策略瀑布式)
-
-```
-search_user(keyword) 执行以下策略，命中即返回:
-  策略1: musicu.fcg search_type=8 搜索普通用户 (需 Cookie 登录态)
-  策略2: smartbox_new.fcg 智能搜索 (无需登录，返回歌手及 singer_mid)
-  策略3: client_search_cp search_type=9 歌手搜索 (无需登录)
-  策略4: 纯数字 UIN → 直接查资料 (get_profile)
-  策略5: 网页端 HTML 解析 (兜底)
-```
-
-### 用户资料查询 (多策略)
-
-```
-get_profile(uid) 执行以下策略:
-  方式1: profile homepage API (fcg_get_profile_homepage)
-         - 适用于普通用户 (uin)
-         - 检测占位昵称并跳过
-  方式2: 从公开歌单数据提取用户信息
-  方式3: 歌手网页抓取 (y.qq.com/n/ryqq/singer/{singer_mid})
-         - 解析 window.__INITIAL_DATA__ 中的 singerDetail.basic_info
-         - 通过 _singer_cache 将搜索到的数字歌手 ID 映射为 singer_mid
-  方式4: 普通用户网页抓取兜底 (y.qq.com/n/ryqq/profile/{uin})
-```
-
-### 主要方法
-
-| 方法 | 功能 | 备注 |
-|------|------|------|
-| `check_alive()` | 检查 Cookie 有效性 | 检测 cookie 字段 (qqmusic_key + uin) |
-| `get_login_user()` | 获取登录用户 | 从 Cookie 读取 uin |
-| `get_profile(uid)` | 获取用户资料 | 手机版 SSR 页面（curl 降级） |
-| `search_user(keyword)` | 搜索用户 | 5种策略瀑布式搜索（见上方说明） |
-| `get_content_lists(uid)` | 获取歌单列表 | 创建 + 收藏 |
-| `get_content_detail(item_id)` | 获取歌单详情 | 含完整歌曲列表 |
-| `get_history(uid)` | 听歌排行 | 累计统计 |
-| `get_events(uid)` | 用户动态 | 基于歌单创建/收藏 |
-| `get_follows(uid, limit)` | 获取关注列表 | 支持分页，需真实 QQ 号 |
-| `get_followers(uid, limit)` | 获取粉丝列表 | 支持分页，粉丝数可从 profile 获取 |
-
-### 使用示例
-
-```python
-from app.platforms.qqmusic.adapter import QQMusicAdapter
-
-adapter = QQMusicAdapter()
-playlists = adapter.get_content_lists("123456789")  # QQ 号 (uin)
-
-# 搜索歌手
-results = adapter.search_user("周杰伦")
-for r in results:
-    print(f"歌手: {r['nickname']} (ID: {r['uid']})")
-    # 无需额外登录即可获取歌手资料
-    profile = adapter.get_profile(r['uid'])
-    print(f"  头像: {profile.avatar_url}")
-for pl in playlists:
-    print(f"歌单: {pl.title} ({pl.count} 首)")
-```
-
-### 已知限制
-
-1. **社交功能（关注/粉丝）**:
-   - **真实 QQ 号用户**: 通过 `friend_follow_or_listen_list.fcg` API 获取，支持分页
-   - **encrypt_uin 用户（隐藏QQ号）**: QQ 音乐不公开其真实 QQ 号，关注列表 API 无法返回详情，仅能从 SSR 页面获取**关注/粉丝总数**。适配器已自动降级为 SSR 统计数模式（`_count_only` 标记）
-   - **粉丝列表不稳定**: QQ 音乐的粉丝 API (`is_listen=1`) 服务端在大 V 账号上可能返回 HTTP 500/超时
-2. **粉丝数后备**: 即使详细列表不可用，粉丝数和关注数仍可从 SSR 页面获取（`profile.extra.mFansNum` / `mFollowNum`）
-3. **SSL 兼容性**: Python requests 对 `i.y.qq.com` / `i2.y.qq.com` 存在 SSL 握手问题，已自动降级为 curl 获取 SSR 页面
-2. **Cookie 依赖**: 获取私人歌单/听歌排行需要登录 Cookie
-3. ~~**用户搜索需要登录态**: `musicu.fcg` 网关搜索用户 (`search_type=8`) 需要有效 Cookie + 正确的 `g_tk`，匿名请求返回空~~
-   - ✅ 已解决: 增加无需登录的 smartbox 搜索和歌手 web scraping 兜底
-4. **g_tk 计算**: Cookie 中 `qqmusic_key` / `qm_keyst` 是新版鉴权字段（替代 `skey`），适配器已支持自动检测
-5. **check_alive**: 使用 cookie 字段检测代替已废弃的首页推荐接口（原接口返回 HTTP 500）
-6. **接口变动**: QQ 音乐可能更新 API 参数，需持续适配
-7. **旧版 API 已废弃**: `splcloud` 域名下的旧版歌手详情 API (`fcg_get_singer_detail.fcg` 等) 返回 HTTP 404，已改为 web scraping 方式
-
----
-
-## 配置指南
-
-### 1. 安装依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-依赖包括: `flask`, `requests`, `pycryptodome`, `PyExecJS`
-
-### 2. 配置 Cookie
-
-在项目根目录的 `credentials/` 文件夹中创建 Cookie 文件：
-
-```
-credentials/
-├── netease_cookie.txt    # 网易云音乐
-├── bilibili_cookie.txt   # 哔哩哔哩
-├── douyin_cookie.txt     # 抖音
-└── qqmusic_cookie.txt    # QQ音乐 (可选)
-```
-
-#### 获取 Cookie 的方法
-
-**抖音**:
-1. 浏览器打开 `https://www.douyin.com/` 并登录
-2. F12 → Application → Cookies → `www.douyin.com`
-3. 复制所有 Cookie 字符串
-4. 保存为 `credentials/douyin_cookie.txt`
-
-**QQ音乐**:
-1. 浏览器打开 `https://y.qq.com/` 并登录
-2. F12 → Application → Cookies → `y.qq.com`
-3. 复制所有 Cookie 字符串
-4. 保存为 `credentials/qqmusic_cookie.txt` 或 `credentials/y.qq_cookie.txt`（别名自动识别）
-
-### 3. 启动服务
-
-```bash
-python run.py
-```
-
-访问 `http://127.0.0.1:5000` 查看面板。
-
-### 4. 启动自动采集
-
-启动后，点击左侧栏的 "▶ 启动" 按钮或通过 API:
-
-```bash
-curl -X POST http://127.0.0.1:5000/api/collector/start
-```
-
-采集器默认每 30 分钟自动采集所有平台数据。
-
----
-
-## API 参考
-
-### 平台状态
-
-```http
-GET /api/{platform}/status
-```
-
-示例: `GET /api/douyin/status`
-
-```json
-{
-  "code": 200,
-  "data": {
-    "platform": "douyin",
-    "alive": true,
-    "login_user": {
-      "uid": "3402315065201417",
-      "nickname": "用户xxx",
-      "avatarUrl": "https://..."
-    }
-  }
-}
-```
-
-### 用户资料
-
-```http
-GET /api/{platform}/profile?uid={uid}
-```
-
-### 用户搜索
-
-```http
-GET /api/{platform}/search?keyword={keyword}&limit=20
-```
-
-### 内容列表
-
-```http
-GET /api/{platform}/playlists?uid={uid}
-```
-
-### 全量数据
-
-```http
-GET /api/{platform}/all?uid={uid}
-```
-
-返回 profile, playlists, records, events, follows, followers 的聚合数据。
-
-### 采集器控制
-
-```http
-GET  /api/collector/status      # 查看状态
-POST /api/collector/start       # 启动采集
-POST /api/collector/stop        # 停止采集
-POST /api/collector/collect     # 立即采集一次
-```
-
----
-
-## 常见问题
-
-### Q: 抖音搜索返回空结果怎么办？
-
-抖音 Web 搜索有严格的反爬限制，这是已知问题。您可以通过以下方式缓解：
-
-1. 使用新 Cookie 登录
-2. 直接使用数字 UID 搜索（而非关键词）
-3. 降低请求频率
-
-### Q: QQ音乐提示 "未配置凭证"？
-
-QQ音乐的大部分公开 API 不需要登录即可使用（资料、歌单搜索等）。
-Cookie 文件不存在时，适配器会降级为未登录模式运行，部分功能受限。
-如需完整功能，请按上述指南配置 Cookie。
-
-### Q: a_bogus 签名失败？
-
-确保已安装 Node.js (v14+) 和 PyExecJS：
-
-```bash
-node --version
-pip install pyexecjs
-```
-
-如果 Node.js 不可用，适配器会自动尝试纯 Python 降级方案（有效性有限）。
-
-### Q: 访问频率限制？
-
-各平台适配器已内置请求间隔控制：
-- 抖音: 2 秒 + 随机延迟
-- QQ音乐: 1 秒 + 随机延迟
-
-如遇 429/403 错误，适配器会自动指数退避重试。
+# 平台实现说明
+
+> 各适配器的完整代码说明见各 `app/platforms/<id>/adapter.py` 模块头部注释；
+> 上游仓库与同步约定见 [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md)。
+> 本文记录每个平台的实现方式与已知的坑。
+
+## 平台矩阵
+
+| 平台 | 标识 | 资料搜索 | 内容列表 | 历史排行 | 动态 | 关注/粉丝 | 实现方式 |
+|------|------|:---:|:---:|:---:|:---:|:---:|------|
+| 网易云音乐 | `netease` | ✅ | 歌单 | ✅ | ✅ | ✅ | weapi 自写（`crypto.py` AES 加密） |
+| 哔哩哔哩 | `bilibili` | ✅ | 投稿 | ❌ | ✅ | ✅ | web 接口自写 |
+| 抖音 | `douyin` | ✅ | 作品 | ❌ | ✅(作品) | ✅ | DouYin_Spider fork 移植（纯 API） |
+| QQ音乐 | `qqmusic` | ✅ | 歌单 | ❌ | ✅(歌单) | ✅ | 自写（SSR + fcg 网关） |
+| 微博 | `weibo` | ✅ | 微博 | ❌ | ✅(微博) | ✅ | m.weibo.cn API + weibo.com PC ajax |
+| 原神 | `genshin` | ✅ | 角色展柜 | ❌ | ❌ | ❌ | enka.network + 米游社绑定接口 |
+| 小红书 | `xhs` | ✅ | 笔记 | ❌ | ✅(笔记) | ❌ | Spider_XHS PC 签名栈移植 |
+
+所有平台统一走 `app/platforms/base.py` 的抽象接口：
+`get_profile / search_user / get_content_lists / get_content_detail / get_history /
+get_events / get_follows / get_followers / refresh_user_info / check_alive / get_login_user`。
+
+## 错误处理约定
+
+**适配器与服务层一律 raise**（`RuntimeError` 带平台前缀与真实原因，如账号标签/风控 code），
+不返回空值伪装成功。唯一例外：
+
+- `get_profile` 对"用户不存在"返回 `None`（404 语义）；
+- `check_alive` 失败返回 `False`。
+
+REST 层（`app/routes/api.py`）是唯一把异常转成 JSON 错误响应的地方；
+`/all` 聚合接口把各子模块错误收进 `_errors` 数组原样展示给前端。
+
+## 各平台要点与坑
+
+### 网易云音乐（netease）
+
+- 请求走 `weapi` 加密（`crypto.py`，pycryptodome AES）。
+- 历史排行（听歌周榜/总榜）是本项目"快照对比推断时间"的数据源之一。
+- 关注/粉丝列表接口返回 (条目, has_more, 真实总数)，是社交展开的正确实现范式。
+
+### 哔哩哔哩（bilibili）
+
+- `-799` 是频率限制：适配器带**连续风控惩罚计数**（每次触发加大等待间隔）。
+- 业务 code 错误（如 -404 用户不存在）直接 `raise RuntimeError` 带 code/msg，不重试。
+- `last_api_error` 实例属性保存最近一次业务错误，供上层拼装完整原因。
+
+### 抖音（douyin）
+
+- **上游是 fork 仓库** `chenglei6-arch/DouYin_Spider`（原仓库 `cv-cat/DouYin_Spider` 的
+  following 列表 `max_time` 有 bug，fork 已修复——同步时务必从 fork 取，详见
+  [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md)）。
+- 签名：`douyin_sign.js`（自包含 SM3，PyExecJS 加载）生成 `a_bogus`；
+  新签名栈（msToken/dtrait/bd_ticket）在 `ref_builder/`、`ref_utils/`。
+- **数字 UID 解析**：参考项目只接受 sec_uid，本项目的 `_resolve_user_info` 对数字 UID
+  做双策略解析（先直接查、失败后与登录用户比对），这是面板能从登录态起步的关键。
+- Web 端查看他人关注/粉丝列表普遍受限（status_code 2096 / mix_count 有值但列表为空），
+  适配器会把这些情况转成明确的 RuntimeError，而不是当成"没有关注任何人"。
+- 请求限速 2s/次且持锁串行化（图谱接口会并发调用适配器）。
+
+### QQ音乐（qqmusic）
+
+- `i.y.qq.com` / `i2.y.qq.com` 在 Windows + requests 下有 SSL 握手问题（SSLEOFError），
+  `_fetch_html` 遇 SSL 错误自动降级为 curl 子进程（详见 [qqmusic_research.md](qqmusic_research.md)）。
+- 用户标识有两种：真实 QQ 号与 `encrypt_uin`（以 `**` 结尾）。加密 uin **无法查询
+  关注/粉丝列表**（平台限制，返回空并注明），但总数可从 fcg 接口取得并存入
+  `profile.extra.follow_count / fan_count`。
+- SSR 数据藏在 `__ssrFirstPageData__` 双重编码 JSON 里，统一由 `_decode_ssr_payload` 解码。
+- 扫码登录（`app/services/qqmusic_qr_login.py`）依赖可选的 Playwright，
+  未安装时该功能明确报错，其余功能不受影响。
+
+### 微博（weibo）
+
+- 主力是 `m.weibo.cn` 移动端 API；关注/粉丝列表走 `weibo.com` PC ajax
+  （m 端 containerid 方案对 PC Cookie 做 wapsso 跨域校验会被拦，参考 WeiboSpider）。
+- 登录失效（ok=-100 + passport 重定向）会直接 `raise`，**不会**静默降级 SSR——
+  历史上的 SSR 兜底是投机性实现（`window.$WB` 正则），已删除。
+- Cookie 中 `SUB` 字段含 uid（正则提取数字部分），用于 get_login_user。
+
+### 原神（genshin）
+
+- 资料来自 enka.network 公开 API；绑定账号通过米游社
+  `getUserGameRolesByCookie`（目前仍可用的少数米游社接口之一）。
+- **仅支持数字 UID 搜索**，昵称搜索会明确报错（米游社不开放）。
+- Enka 404 = 用户不存在（返回 None）；424 = 维护中（上抛）；其余错误上抛。
+
+### 小红书（xhs）
+
+- PC 签名栈移植自 Spider_XHS，含 `ref_xhs_core/`（签名 JS）与 `ref_xhs_pc/`（PC 请求栈）。
+- 签名算法随上游演进，突然全线失败时优先检查上游是否有算法更新
+  （同步范围与步骤见 [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md)）。
+- 关注/粉丝接口需特殊权限，未实现。
+- Cookie 配置与已知问题见 [XHS.md](XHS.md)。
