@@ -1,9 +1,9 @@
 """
 多账号适配器池 —— 多账号并发查询的核心。
 
-账号模型:
-- 主账号: credentials/<platform>_cookie.txt，账号 ID 固定为 "primary"（与旧行为一致）
-- 附加账号: credentials/accounts.json（通过 /api/accounts/<platform> 管理）
+账号模型（统一存储于 credentials/accounts.json）:
+- 主账号: 固定 id "primary"，私有数据接口固定走主账号；可停用（停用后不参与轮询）
+- 附加账号: 通过 /api/accounts/<platform> 管理，可停用
 
 每个账号对应一个独立的适配器实例。各适配器的限速状态
 （_last_request_at / 限速锁 / B站惩罚计数等）天然按实例隔离，
@@ -16,20 +16,19 @@ import threading
 from contextlib import contextmanager
 from typing import Callable, Optional
 
-from app.credentials import CredentialManager
-
-PRIMARY_ACCOUNT_ID = "primary"
+from app.credentials import CredentialManager, PRIMARY_ACCOUNT_ID
 
 
 class _Slot:
     """池中的一个账号槽位（适配器懒构造）"""
 
     def __init__(self, platform: str, account_id: str, label: str,
-                 factory: Callable):
+                 factory: Callable, enabled: bool = True):
         self.platform = platform
         self.account_id = account_id
         self.label = label
         self.factory = factory
+        self.enabled = enabled
         self.adapter = None  # 懒构造，避免启动时实例化所有平台
 
     def get_adapter(self):
@@ -58,8 +57,16 @@ class AdapterPool:
 
     def _reload_slots(self):
         """从凭证管理器重建槽位列表（主账号固定在前，附加账号按配置顺序）"""
-        slots = [_Slot(self.platform, PRIMARY_ACCOUNT_ID, "主账号", self._factory)]
+        slots = []
+        primary = CredentialManager.get_account(self.platform, PRIMARY_ACCOUNT_ID)
+        slots.append(_Slot(
+            self.platform, PRIMARY_ACCOUNT_ID,
+            (primary or {}).get("name") or "主账号", self._factory,
+            enabled=bool((primary or {}).get("enabled", True)),
+        ))
         for acc in CredentialManager.get_accounts(self.platform):
+            if acc["id"] == PRIMARY_ACCOUNT_ID:
+                continue
             if acc.get("enabled", True):
                 slots.append(_Slot(
                     self.platform, acc["id"], acc.get("name") or acc["id"], self._factory
@@ -105,9 +112,9 @@ class AdapterPool:
 
     @property
     def size(self) -> int:
-        """可用账号数（参与轮询的槽位数）"""
+        """可用账号数（参与轮询的槽位数，停用账号不计入）"""
         with self._lock:
-            return len(self._slots)
+            return sum(1 for s in self._slots if s.enabled)
 
     @property
     def total(self) -> int:
@@ -115,7 +122,7 @@ class AdapterPool:
         return self.size
 
     def primary(self):
-        """主账号适配器（历史记录等私有数据接口固定走主账号）"""
+        """主账号适配器（历史记录等私有数据接口固定走主账号；主账号停用仍可用）"""
         with self._lock:
             slot = self._slots[0] if self._slots else None
         return slot.get_adapter() if slot else None
@@ -167,9 +174,10 @@ class AdapterPool:
 
     def _acquire(self) -> Optional[_Slot]:
         with self._lock:
-            if not self._slots:
+            enabled = [s for s in self._slots if s.enabled]
+            if not enabled:
                 return None
-            slot = self._slots[self._rr % len(self._slots)]
+            slot = enabled[self._rr % len(enabled)]
             self._rr += 1
             return slot
 

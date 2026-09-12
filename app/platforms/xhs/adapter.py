@@ -13,7 +13,6 @@
     adapter = XhsAdapter()
     profile = adapter.get_profile("user_id")
 """
-import os
 import sys
 import threading
 import time
@@ -56,27 +55,13 @@ class XhsAdapter(BasePlatformAdapter):
     # ==================== 凭证加载 ====================
 
     def _load_cookie_str(self) -> str:
-        """
-        加载小红书 Cookie 字符串
-        优先级: credentials/xhs_cookie.txt → .env XHS_COOKIES
-        """
+        """加载本账号的小红书 Cookie 字符串（统一走 CredentialManager / accounts.json）"""
         cookies = self._load_cookies()
         if cookies:
-            cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-            print(f"[小红书] 从 credentials/xhs_cookie.txt 加载: {len(cookies)} 个字段")
-            return cookie_str
+            print(f"[小红书] 加载 Cookie: {len(cookies)} 个字段（account_id={self.account_id or 'primary'}）")
+            return "; ".join([f"{k}={v}" for k, v in cookies.items()])
 
-        # 从 .env 加载
-        from dotenv import load_dotenv
-        root_env = Path(__file__).parent.parent.parent.parent / ".env"
-        if root_env.exists():
-            load_dotenv(dotenv_path=root_env, override=True)
-            xhs_cookies = os.environ.get("XHS_COOKIES", "")
-            if xhs_cookies:
-                print(f"[小红书] 从根目录 .env 加载")
-                return xhs_cookies.strip().strip("'").strip('"')
-
-        print(f"[小红书] 警告: 未找到任何 Cookie 来源")
+        print("[小红书] 警告: 未配置 Cookie")
         return ""
 
     # ==================== Auth 初始化 ====================

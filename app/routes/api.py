@@ -49,7 +49,7 @@ from app.platforms import get_adapter, get_pool, list_platforms, reset_adapter, 
 from app.config import DEFAULT_TARGET_UID, DEFAULT_PLATFORM
 from app.data.store import DataStore
 from app.platforms.base import dataclass_to_dict
-from app.credentials import CredentialManager
+from app.credentials import CredentialManager, PRIMARY_ACCOUNT_ID
 from app.services.log_hub import get_log_hub
 from app.services.social_expander import graph_user_node
 from app.services.expand_queue import get_expand_queue
@@ -211,7 +211,7 @@ def update_credentials(platform):
     cookie_str = str(body.get("cookie", "")).strip()
     if not cookie_str:
         return _error("cookie 内容为空", http_status=400)
-    if platform not in CredentialManager.PLATFORM_FILES:
+    if platform not in CredentialManager.PLATFORMS:
         return _error(f"未知平台: {platform}", http_status=404)
 
     try:
@@ -259,25 +259,29 @@ def platform_cache_clear(platform):
 
 
 # ==================== 多账号管理 ====================
-# 主账号 = credentials/<platform>_cookie.txt（上面的 /credentials 端点维护）
-# 附加账号 = credentials/accounts.json（本组端点维护），用于多账号并发查询
+# 所有账号统一存储于 credentials/accounts.json：
+# 主账号 = 固定 id "primary"（上面的 /credentials 端点是它的更新入口）
+# 附加账号 = 自动生成 id，用于多账号并发查询
 
 @bp.route("/accounts/<platform>")
 def accounts_list(platform):
     """列出平台的所有账号（主账号 + 附加账号）"""
-    if platform not in CredentialManager.PLATFORM_FILES:
+    if platform not in CredentialManager.PLATFORMS:
         return _error(f"未知平台: {platform}", http_status=404)
 
-    primary_cookies = CredentialManager.load_cookies(platform)
+    primary = CredentialManager.get_account(platform, PRIMARY_ACCOUNT_ID) or {}
+    primary_keys = list(CredentialManager.parse_cookie_str(primary.get("cookie", "")).keys())
     accounts = [{
         "id": "primary",
-        "name": "主账号",
+        "name": primary.get("name") or "主账号",
         "primary": True,
-        "enabled": True,
-        "has_credential": bool(primary_cookies),
-        "cookie_keys": list(primary_cookies.keys()),
+        "enabled": bool(primary.get("enabled", True)),
+        "has_credential": bool(primary_keys),
+        "cookie_keys": primary_keys,
     }]
     for a in CredentialManager.get_accounts(platform):
+        if a["id"] == PRIMARY_ACCOUNT_ID:
+            continue
         keys = CredentialManager.parse_cookie_str(a.get("cookie", "")).keys()
         accounts.append({
             "id": a["id"],
@@ -298,7 +302,7 @@ def accounts_list(platform):
 @bp.route("/accounts/<platform>", methods=["POST"])
 def accounts_add(platform):
     """添加附加账号（body: {cookie, name?}）"""
-    if platform not in CredentialManager.PLATFORM_FILES:
+    if platform not in CredentialManager.PLATFORMS:
         return _error(f"未知平台: {platform}", http_status=404)
     body = request.get_json(silent=True) or {}
     try:
@@ -313,9 +317,7 @@ def accounts_add(platform):
 
 @bp.route("/accounts/<platform>/<account_id>", methods=["POST"])
 def accounts_update(platform, account_id):
-    """更新附加账号（body: {name?, cookie?, enabled?}，字段可选）"""
-    if account_id == "primary":
-        return _error("主账号请通过 /credentials/<platform> 更新", http_status=400)
+    """更新账号（body: {name?, cookie?, enabled?}，字段可选；主账号与附加账号通用）"""
     body = request.get_json(silent=True) or {}
     account = CredentialManager.update_account(
         platform, account_id,
@@ -332,8 +334,8 @@ def accounts_update(platform, account_id):
 @bp.route("/accounts/<platform>/<account_id>", methods=["DELETE"])
 def accounts_delete(platform, account_id):
     """删除附加账号"""
-    if account_id == "primary":
-        return _error("主账号不可删除，可通过 /credentials/<platform> 覆盖", http_status=400)
+    if account_id == PRIMARY_ACCOUNT_ID:
+        return _error("主账号不可删除，可停用或通过 /credentials/<platform> 覆盖", http_status=400)
     if not CredentialManager.remove_account(platform, account_id):
         return _error("账号不存在", http_status=404)
     reset_pool(platform)
@@ -344,7 +346,7 @@ def accounts_delete(platform, account_id):
 def accounts_test(platform, account_id):
     """
     测试单个账号的 Cookie 可用性（真实调用平台接口探测，非仅检查字段存在）。
-    account_id 为 "primary"（主账号）或 accounts.json 里的附加账号 id。
+    account_id 为 "primary"（主账号）或附加账号 id。
     返回 {ok, login_user?, error?, warning?, latency_ms, account_id}：
     ok=凭证可用；warning=可用但探测中遇到非致命问题（如平台限制）；error=不可用原因。
     """

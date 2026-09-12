@@ -94,7 +94,8 @@ def reset_pool(platform_id: str):
 
 def known_platform_ids() -> list[str]:
     """所有已注册的平台 id（轻量，不做网络检查；与 _factory_for 的分支保持一致）"""
-    return ["netease", "bilibili", "douyin", "qqmusic", "weibo", "genshin", "xhs"]
+    from app.credentials import PLATFORMS
+    return list(PLATFORMS)
 
 
 def list_platforms() -> list[dict]:

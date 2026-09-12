@@ -43,7 +43,7 @@ def main():
             except Exception as e:
                 print(f"  ⚠ {p['name']}: {e}")
         else:
-            print(f"  ○ {p['name']}: 未配置凭证（将 {p['credential_file']} 放入 Cookie 即可启用）")
+            print(f"  ○ {p['name']}: 未配置凭证（在面板中配置 Cookie 即可启用）")
 
     # 默认监控用户
     if DEFAULT_TARGET_UID:

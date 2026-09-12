@@ -111,21 +111,16 @@ class DouyinAdapter(BasePlatformAdapter):
     # ==================== 认证 ====================
 
     def _load_cookie_str(self) -> str:
-        """加载抖音 Cookie 字符串
-
-        用户更新 Cookie 请修改 credentials/douyin_cookie.txt；
-        附加账号（多账号池）直接加载自己绑定的 Cookie。
-        """
+        """加载抖音 Cookie 字符串（统一存于 accounts.json，按账号池绑定的账号加载）"""
         cookies = self._load_cookies()
         if cookies:
             cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
             sid = cookies.get("sessionid", "")
-            src = "credentials/douyin_cookie.txt" if not self.account_id else f"accounts.json({self.account_id})"
-            print(f"[抖音] 从 {src} 加载: {len(cookies)} 个字段"
+            print(f"[抖音] 加载 Cookie: {len(cookies)} 个字段（account_id={self.account_id or 'primary'}）"
                   + (f", session={sid[:10]}..." if sid else ""))
             return cookie_str
 
-        print(f"[抖音] 警告: 未找到任何 Cookie 来源")
+        print("[抖音] 警告: 未配置 Cookie")
         return ""
 
     @property
@@ -271,7 +266,7 @@ class DouyinAdapter(BasePlatformAdapter):
         搜索用户 — 参考 DouYin_Spider: DouyinAPI.search_some_user
 
         注意: 抖音搜索 API 需要新鲜的 Cookie，否则会触发 verify_check 验证码。
-        如返回空结果，请更新 credentials/douyin_cookie.txt。
+        如返回空结果，请在面板中更新主账号 Cookie（accounts.json 的 primary 条目）。
         获取方法: 浏览器登录抖音 → F12 → Application → Cookies → 复制全部 douyin.com 的 Cookie。
         """
         try:

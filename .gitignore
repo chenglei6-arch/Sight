@@ -22,7 +22,6 @@ env/
 
 # 敏感凭证 — 绝对不要提交（前导 / 避免误伤 app/credentials/ 模块）
 /credentials/
-cookie.txt
 
 # 数据库文件（仅根目录下的 data/ 存放 SQLite 数据库）
 /data/

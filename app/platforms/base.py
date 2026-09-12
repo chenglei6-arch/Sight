@@ -104,8 +104,8 @@ class BasePlatformAdapter(ABC):
 
     def __init__(self, credentials: dict = None, account_id: str = None):
         self.credentials = credentials or {}
-        # 多账号池绑定的账号 ID；None = 主账号（credentials/<platform>_cookie.txt），
-        # 其他值 = accounts.json 中的附加账号。子类加载 Cookie 时应使用 _load_cookies()。
+        # 多账号池绑定的账号 ID；None = 主账号（accounts.json 中 id 为 "primary" 的条目），
+        # 其他值 = 附加账号。子类加载 Cookie 时应使用 _load_cookies()。
         self.account_id = account_id
 
     def _load_cookies(self) -> dict:

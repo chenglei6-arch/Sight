@@ -41,7 +41,7 @@ app/
 │   ├── log_hub.py           stdout/stderr 镜像 → 环形缓冲 → SSE
 │   └── qqmusic_qr_login.py  QQ音乐扫码登录（可选 Playwright）
 ├── data/store.py            SQLite 快照/时间线/图谱/展开任务持久化
-├── credentials/             凭证管理（主账号 *_cookie.txt + accounts.json 多账号）
+├── credentials/             凭证管理（accounts.json 统一存储：主账号 primary + 附加账号）
 └── web/                     前端构建产物（勿手改，npm run build 生成）
 
 frontend/src/

@@ -11,19 +11,19 @@
 
 顶栏「账号」→ 选择「小红书」→ 粘贴 Cookie → 保存为主账号。
 
-### 方式二：直接写文件
+### 方式二：直接改文件
 
 1. 浏览器登录 https://www.xiaohongshu.com
 2. `F12` → Application → Cookies → `xiaohongshu.com`
-3. 复制完整 Cookie 字符串，保存到 `credentials/xhs_cookie.txt`：
+3. 复制完整 Cookie 字符串，写入 `credentials/accounts.json` 中 `xhs` 平台的主账号条目：
 
+```json
+{
+  "xhs": [
+    { "id": "primary", "name": "主账号", "cookie": "a1=18abcdef...; webId=abc123; web_session=040069b...; ...", "enabled": true }
+  ]
+}
 ```
-a1=18abcdef...; webId=abc123; web_session=040069b...; ...
-```
-
-### 方式三：环境变量
-
-根目录 `.env` 中配置 `XHS_COOKIES="a1=xxx; web_session=xxx; ..."`。
 
 ### 验证
 

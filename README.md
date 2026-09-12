@@ -20,19 +20,25 @@ python run.py
 
 ## Cookie 配置
 
-登录对应平台后复制完整 Cookie，保存到 `credentials/` 下的文件：
+所有凭证统一存储在 `credentials/accounts.json`（已被 Git 忽略，切勿提交）。
+推荐在面板中配置：图谱页平台状态条 →「配置 Cookie」粘贴即可，主账号与多账号（并发加速）在同一弹窗管理。
 
-| 平台 | 文件 |
-| --- | --- |
-| 网易云音乐 | `netease_cookie.txt` |
-| 哔哩哔哩 | `bilibili_cookie.txt` |
-| 抖音 | `douyin_cookie.txt` |
-| QQ 音乐 | `y.qq_cookie.txt` |
-| 微博 | `weibo_cookie.txt` |
-| 原神 | `genshin_cookie.txt` |
-| 小红书 | `xhs_cookie.txt` |
+也可以手动编辑 `credentials/accounts.json`，每个平台是一个账号数组：
 
-文件已被 Git 忽略，切勿提交 Cookie。未配置 Cookie 也能启动，但对应平台功能会受限。小红书 Cookie 可能过期，需要重新获取。
+```json
+{
+  "netease": [
+    { "id": "primary", "name": "主账号", "cookie": "k=v; k2=v2", "enabled": true },
+    { "id": "acc_xxx", "name": "账号2", "cookie": "k=v", "enabled": true }
+  ]
+}
+```
+
+- `id` 为 `primary` 的是主账号（历史记录等私有数据接口固定使用，不可删除），其余为附加账号
+- `enabled: false` 可把账号移出多账号轮询（不删除凭证）
+- Cookie 内容在下次请求时生效；增删账号建议走面板（会同步重建账号池）
+
+未配置 Cookie 也能启动，但对应平台功能会受限。小红书 Cookie 可能过期，需要重新获取。
 
 ## 常用 API
 

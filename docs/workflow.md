@@ -8,7 +8,7 @@
 ```
 ① app/platforms/<id>/adapter.py    新建适配器（实现 base.py 抽象接口）
 ② app/platforms/__init__.py        _factory_for() 加分支 + known_platform_ids() 加 id
-③ app/credentials/__init__.py      PLATFORM_FILES 加凭证文件名映射
+③ app/credentials/__init__.py      PLATFORMS 元组加平台 id
 ④ frontend/src/platforms.js        PLATFORMS 数组加平台配置（前端渲染契约）
 ⑤ app/services/timeline.py         PLATFORM_NAME_MAP / CONTENT_TYPE_MAP 加映射
 ⑥ docs/platforms.md                补平台矩阵一行与要点（如有坑）
@@ -64,10 +64,10 @@ def known_platform_ids():
 
 ```python
 # app/credentials/__init__.py
-PLATFORM_FILES = {..., "xxx": "xxx_cookie.txt"}
+PLATFORMS = ("netease", ..., "bilibili", ..., "xxx")
 ```
 
-凭证文件放 `credentials/xxx_cookie.txt`（git 忽略），或让用户在面板「账号」弹窗里粘贴。
+凭证统一存于 `credentials/accounts.json`（git 忽略）：每个平台一个账号数组，主账号条目 id 固定为 `"primary"`。新平台加好后，让用户在面板「配置 Cookie」弹窗里粘贴即可，代码无需任何额外改动。
 
 ## 4. 前端配置（frontend/src/platforms.js）
 

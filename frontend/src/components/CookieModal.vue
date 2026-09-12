@@ -1,8 +1,9 @@
 <script setup>
 /**
  * 平台 Cookie / 多账号配置弹窗：
- * - 主账号: credentials/<platform>_cookie.txt（原单账号行为，历史记录等私有数据固定走它）
- * - 附加账号: 存于 credentials/accounts.json，与主账号组成账号池，
+ * - 所有账号统一存于 credentials/accounts.json，
+ *   主账号（id 固定 primary）历史记录等私有数据固定走它
+ * - 主账号与附加账号组成账号池，
  *   图谱展开等批量查询会并行使用所有账号，速度近似按账号数提升
  * - 附加账号控制: 添加 / 启停 / 删除
  * - QQ音乐支持扫码登录（复用全局 QrLoginModal）
@@ -227,7 +228,7 @@ function qrLogin() {
       <template v-if="loadingStatus"><span class="spinner spinner-sm" />读取凭证状态…</template>
       <template v-else-if="status?.has_credential">
         <Icon name="check" :size="13" class="ck-ok" />
-        已配置 Cookie（{{ status.cookie_keys.length }} 个字段，保存于 credentials/{{ selPlatform }}_cookie.txt）
+        已配置 Cookie（{{ status.cookie_keys.length }} 个字段，保存于 credentials/accounts.json）
         <button
           class="btn btn-sm ck-status-btn"
           :disabled="rowTesting['primary']"
