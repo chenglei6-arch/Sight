@@ -5,7 +5,12 @@ PyExecJS>=1.5.1
 python-dotenv>=1.0
 curl_cffi==0.15.0
 loguru>=0.7.0
-retry>=0.9.2
 # 抖音社交接口（ref_builder/ref_static 新签名栈）所需
 protobuf>=5.27
 ecdsa>=0.18
+# 抖音 ref_dy_apis/douyin_api.py（页面解析）与 ref_utils（challenge_sign/dtrait/fingerprint）所需
+beautifulsoup4>=4.12
+cryptography>=42.0
+# 可选：QQ音乐扫码登录（app/services/qqmusic_qr_login.py）依赖 Playwright，
+# 未安装时该功能会提示 "Playwright 未安装"，其余功能不受影响
+# playwright>=1.40
