@@ -34,6 +34,7 @@ QQ音乐扫码登录:
   /api/platforms                                列出所有平台
   /api/credentials/<platform>                   查看/更新凭证
   /api/accounts/<platform>                      多账号管理
+  /api/<platform>/cache/clear (POST)            清空平台运行期内存缓存
 """
 import json
 import time
@@ -227,6 +228,36 @@ def update_credentials(platform):
         return _error(str(e))
 
 
+@bp.route("/<platform>/cache/clear", methods=["POST"])
+def platform_cache_clear(platform):
+    """
+    清空平台运行期内存缓存，下次请求重新拉取：
+      - 适配器实例缓存（抖音用户缓存 / QQ音乐 SSR 页缓存 / 原神绑定 UID 等，
+        实例丢弃即清空，随后按当前凭证重建）
+      - 模块级缓存（抖音 msToken）
+      - 关系图搜索缓存中该平台的条目（_search_cache）
+
+    注意 SQLite 快照（/all 的 30 分钟缓存）属于持久化数据不做删除，
+    前端随后以 /all?refresh=1 绕过快照强制实时拉取。
+    """
+    pool = get_pool(platform)
+    if not pool:
+        return _error(f"未知平台: {platform}", http_status=404)
+
+    with _search_cache_lock:
+        stale = [k for k in _search_cache if k[0] == platform]
+        for k in stale:
+            del _search_cache[k]
+
+    dropped, cleared = pool.clear_caches()
+    return _result({
+        "platform": platform,
+        "adapters_dropped": dropped,
+        "cleared": cleared,
+        "search_cache_cleared": len(stale),
+    })
+
+
 # ==================== 多账号管理 ====================
 # 主账号 = credentials/<platform>_cookie.txt（上面的 /credentials 端点维护）
 # 附加账号 = credentials/accounts.json（本组端点维护），用于多账号并发查询
@@ -307,6 +338,35 @@ def accounts_delete(platform, account_id):
         return _error("账号不存在", http_status=404)
     reset_pool(platform)
     return _result({"deleted": account_id})
+
+
+@bp.route("/accounts/<platform>/<account_id>/test", methods=["POST"])
+def accounts_test(platform, account_id):
+    """
+    测试单个账号的 Cookie 可用性（真实调用平台接口探测，非仅检查字段存在）。
+    account_id 为 "primary"（主账号）或 accounts.json 里的附加账号 id。
+    返回 {ok, login_user?, error?, warning?, latency_ms, account_id}：
+    ok=凭证可用；warning=可用但探测中遇到非致命问题（如平台限制）；error=不可用原因。
+    """
+    pool = get_pool(platform)
+    if not pool:
+        return _error(f"未知平台: {platform}", http_status=404)
+
+    adapter = pool.adapter_for_account(account_id)
+    if adapter is None:
+        # 停用的附加账号不在池内，给明确提示而不是"账号不存在"
+        if any(a["id"] == account_id for a in CredentialManager.get_accounts(platform)):
+            return _result({"ok": False, "error": "账号已停用，启用后才能测试"})
+        return _error("账号不存在", http_status=404)
+
+    t0 = time.perf_counter()
+    try:
+        result = adapter.test_account()
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+    result["latency_ms"] = round((time.perf_counter() - t0) * 1000)
+    result["account_id"] = account_id
+    return _result(result)
 
 
 # ==================== 用户搜索（跨平台） ====================
@@ -582,7 +642,7 @@ def graph_expand_resume():
 
 @bp.route("/graph/expand/status")
 def graph_expand_status():
-    """各平台队列状态（排队/执行/暂停原因/账号数），供前端状态条展示"""
+    """各平台队列状态（排队/执行/暂停原因/账号数）+ 执行中/排队任务明细与占用账号，供前端队列面板展示"""
     return _result({"queues": get_expand_queue().platform_status()})
 
 
@@ -814,7 +874,9 @@ def _snapshot_is_usable(platform: str, data_type: str, snapshot: dict) -> bool:
 
 @bp.route("/<platform>/all")
 def platform_all(platform):
-    """获取平台所有数据（单次请求，避免并行触发频率限制）"""
+    """获取平台所有数据（单次请求，避免并行触发频率限制）
+    refresh=1 时绕过 30 分钟快照缓存强制实时拉取（"清理缓存"按钮用），新数据照常写入快照
+    """
     uid = _get_uid(platform)
     if not uid:
         return _error("未指定用户 UID")
@@ -823,6 +885,8 @@ def platform_all(platform):
     if not adapter:
         return _error(f"未知平台: {platform}", http_status=404)
 
+    refresh = request.args.get("refresh", "").strip() in ("1", "true")
+
     t0 = time.perf_counter()
     success = False
     detail = ""
@@ -830,13 +894,13 @@ def platform_all(platform):
         result = {"platform": platform, "uid": uid}
         errors = []  # 收集各子模块错误，但不中断整体返回
 
-        # 用户资料：30 分钟内的快照直接用；过期/缺失实时拉取，失败计入 errors
+        # 用户资料：30 分钟内的快照直接用（refresh=1 强制实时）；过期/缺失实时拉取，失败计入 errors
         result["profile"] = None
         try:
             real_snaps = [
                 s for s in get_store().get_snapshots(platform, uid, "profile", limit=5)
                 if not _is_marker(s)
-            ]
+            ] if not refresh else []
             fresh = None
             for s in real_snaps:
                 age = _snapshot_age(s)
@@ -858,13 +922,13 @@ def platform_all(platform):
         except Exception as e:
             errors.append(f"profile: {e}")
 
-        # 内容列表：30 分钟内的快照直接用；过期/缺失实时拉取 + 写入快照，失败计入 errors
+        # 内容列表：30 分钟内的快照直接用（refresh=1 强制实时）；过期/缺失实时拉取 + 写入快照，失败计入 errors
         result["playlists"] = []
         try:
             real_pl = [
                 s for s in get_store().get_snapshots(platform, uid, "playlists", limit=5)
                 if not _is_marker(s)
-            ]
+            ] if not refresh else []
             snap_pl = None
             for s in real_pl:
                 age = _snapshot_age(s)
@@ -910,13 +974,13 @@ def platform_all(platform):
         except Exception as e:
             errors.append(f"records: {e}")
 
-        # 动态：优先快照，失败时实时获取 + 写入快照
+        # 动态：优先快照（refresh=1 强制实时），失败时实时获取 + 写入快照
         result["events"] = []
         try:
             real_ev = [
                 s for s in get_store().get_snapshots(platform, uid, "events", limit=5)
                 if not _is_marker(s)
-            ]
+            ] if not refresh else []
             snap_ev = None
             for s in real_ev:
                 age = _snapshot_age(s)

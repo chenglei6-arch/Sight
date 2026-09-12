@@ -44,7 +44,7 @@ def graph_user_node(pid: str, u: dict):
     return node
 
 
-def expand_social(body: dict) -> dict:
+def expand_social(body: dict, account_sink=None) -> dict:
     """
     展开某用户的社交关系，返回可合并进关系图的 nodes/edges。
 
@@ -59,6 +59,10 @@ def expand_social(body: dict) -> dict:
       intercheck_extra         图中与目标相邻、但不在本次拉取结果里的 uid，补查它们
       intercheck_limit         最多互查多少个邻居（默认 40）
       intercheck_follow_limit  每个邻居取多少条关注（默认 50）
+
+    account_sink: 可选回调，每次租借到账号执行请求时以 (方向, 账号标签) 调用一次：
+      方向为 "follows" / "followers" / "intercheck"（互查为多线程轮询，标签可能多个）。
+      队列面板"哪个账号在展开哪个用户的哪个方向"的数据来源。
 
     返回 counts 附带 more（该方向是否还有更多）与 total（真实总数，平台支持时），
     供前端判断"还剩多少未展开"。平台未知时抛 ValueError。
@@ -96,6 +100,15 @@ def expand_social(body: dict) -> dict:
     follows_list: list = []
     followers_list: list = []
 
+    def _mark_account(name, ad):
+        """上报本次请求使用的账号与方向（供队列面板展示"哪个账号在展开哪个方向"）"""
+        if account_sink is None:
+            return
+        try:
+            account_sink(name, pool.label_for(ad))
+        except Exception:
+            pass  # 展示辅助信息，失败不影响拉取
+
     def _fetch_via_pool(name, fn_name, limit, offset):
         """通过账号池租借适配器拉取数据；失败记录真实原因，由前端展示，不吞错"""
         if limit <= 0:
@@ -104,6 +117,7 @@ def expand_social(body: dict) -> dict:
             if ad is None:
                 errors[name] = "无可用账号"
                 return [], False, -1
+            _mark_account(name, ad)
             try:
                 # 各平台 get_follows/get_followers 已统一为 (条目, 还有更多, 总数)
                 items, more, total = getattr(ad, fn_name)(uid, limit, offset)
@@ -181,6 +195,7 @@ def expand_social(body: dict) -> dict:
         with pool.lease() as ad:
             if ad is None:
                 return []
+            _mark_account("intercheck", ad)
             try:
                 follows, _more, _total = ad.get_follows(n_uid, intercheck_follow_limit)
             except Exception:

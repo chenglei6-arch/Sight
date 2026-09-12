@@ -30,6 +30,8 @@ BREAKER_THRESHOLD = 5
 # 预算上限：单图同时排队/执行的任务数、单平台队列最大长度
 MAX_PENDING_PER_GRAPH = 500
 MAX_QUEUE_PER_PLATFORM = 400
+# 状态接口里执行中/排队任务明细最多返回多少条（防超长队列撑爆载荷）
+MAX_TASKS_IN_STATUS = 20
 
 
 @dataclass
@@ -57,6 +59,9 @@ class PlatformQueue:
         self._pause_reason = ""
         self._consecutive_fail = 0
         self._in_flight: dict[int, ExpandTask] = {}  # task_id -> task（执行中，stop 不取消）
+        # task_id -> {方向: 账号标签集合}，方向为 follows/followers/intercheck
+        # （队列面板"哪个账号在展开哪个用户的哪个方向"）
+        self._task_accounts: dict[int, dict[str, set[str]]] = {}
 
     @property
     def interval(self) -> float:
@@ -76,6 +81,35 @@ class PlatformQueue:
 
     def running_count(self) -> int:
         return self._running
+
+    # ==================== 任务明细（队列面板展示用） ====================
+
+    def running_tasks_snapshot(self) -> list[dict]:
+        """执行中任务明细：用户 + 各方向（关注/粉丝/互查）动用的账号标签"""
+        with self._lock:
+            tasks = list(self._in_flight.values())[:MAX_TASKS_IN_STATUS]
+            accs = {
+                tid: {name: sorted(labels) for name, labels in m.items()}
+                for tid, m in self._task_accounts.items()
+            }
+        out = []
+        for t in tasks:
+            m = accs.get(t.id, {})
+            flat = sorted({label for labels in m.values() for label in labels})
+            out.append({
+                "id": t.id,
+                "uid": t.uid,
+                "nickname": t.nickname,
+                "accounts": flat,          # 兼容：任务动用账号的并集
+                "account_map": m,          # 方向级明细：follows/followers/intercheck -> 账号列表
+            })
+        return out
+
+    def pending_tasks_snapshot(self) -> list[dict]:
+        """排队任务明细（按入队顺序，最多前 MAX_TASKS_IN_STATUS 条）"""
+        with self._lock:
+            tasks = list(self._queue)[:MAX_TASKS_IN_STATUS]
+        return [{"id": t.id, "uid": t.uid, "nickname": t.nickname} for t in tasks]
 
     # ==================== 入队 / 取消 ====================
 
@@ -143,18 +177,24 @@ class PlatformQueue:
                 continue
             self._running += 1
             self._in_flight[task.id] = task
+            acc_map = self._task_accounts.setdefault(task.id, {})
+
+            def account_sink(name: str, label: str, _m=acc_map):
+                _m.setdefault(name, set()).add(label)
+
             try:
                 self._store.update_expand_task(task.id, "running")
             except Exception as e:
                 print(f"[ExpandQueue] 任务 {task.id} running 状态落库失败: {e}")
             try:
-                payload = expand_social(task.params)
+                payload = expand_social(task.params, account_sink=account_sink)
                 self._finish(task, payload)
             except Exception as e:
                 self._finish(task, None, error=str(e))
             finally:
                 self._running -= 1
                 self._in_flight.pop(task.id, None)
+                self._task_accounts.pop(task.id, None)
                 time.sleep(self.interval)
 
     def _finish(self, task: ExpandTask, payload: dict | None, error: str = None):
@@ -357,6 +397,10 @@ class ExpandQueueManager:
                 "pause_reason": q.pause_reason if q else "",
                 "accounts": pool.size if pool else 0,
                 "interval": q.interval if q else 0.3,
+                # 任务明细与账号占用（队列面板展示"正在展开哪些用户、哪个账号在展开"）
+                "active_accounts": pool.active_labels() if pool else [],
+                "running_tasks": q.running_tasks_snapshot() if q else [],
+                "pending_tasks": q.pending_tasks_snapshot() if q else [],
             })
         return out
 

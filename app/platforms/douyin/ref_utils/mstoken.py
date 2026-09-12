@@ -28,6 +28,12 @@ _COMMON_URL = "https://mssdk.bytedance.com/web/common"
 _cache = {"token": "", "ts": 0}
 _TTL = 600
 
+
+def clear_cache():
+    """清空 msToken 内存缓存，下次 get_mstoken 重新获取（平台"清理缓存"按钮用）"""
+    _cache["token"] = ""
+    _cache["ts"] = 0
+
 _COMMON_PROFILE_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "mstoken_common_profile.json")

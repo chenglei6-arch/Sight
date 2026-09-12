@@ -210,8 +210,9 @@ class BilibiliAdapter(BasePlatformAdapter):
                 "signature": u.get("usign", ""),
                 "gender": {"男": 1, "女": 2}.get(u.get("gender", ""), 0),
                 "is_vip": u.get("vip", {}).get("status", 0) == 1,  # 大会员
-                # 官方机构认证（type=1）才视为“达人”；个人认证(type=0)不是
-                "is_verified": (u.get("official_verify") or {}).get("type", -1) == 1,
+                # 官方认证即视为"达人"：type=1 机构号、type=0 个人认证（B站知名UP主的认证都是个人认证，
+                # 如"bilibili 知名科普UP主"；漏掉它则大V灰化判定对绝大多数知名UP失效）
+                "is_verified": (u.get("official_verify") or {}).get("type", -1) in (0, 1),
                 "fans": u.get("fans", 0),
                 "videos": u.get("videos", 0),
             }
@@ -439,8 +440,10 @@ class BilibiliAdapter(BasePlatformAdapter):
                     "avatarUrl": f.get("face", ""),
                     "signature": f.get("sign", ""),
                     "gender": {"男": 1, "女": 2}.get(f.get("gender", ""), 0),
-                    # 官方机构认证(type=1)才视为“达人”；个人认证(type=0)不是
-                    "is_verified": _dict(f.get("official_verify")).get("type", -1) == 1,
+                    # 官方认证即视为"达人"（type=1 机构号 / type=0 个人认证的知名UP）
+                    "is_verified": _dict(f.get("official_verify")).get("type", -1) in (0, 1),
+                    # relation 列表接口不返回粉丝数字段，这里恒为 0；
+                    # 大V判定靠上面的认证标记，粉丝数用图谱"重新标记"（relation/stat）补全
                     "fans": f.get("fans", 0) or 0,
                 })
                 if len(items) >= need:
@@ -478,9 +481,17 @@ class BilibiliAdapter(BasePlatformAdapter):
         profile = self.get_profile(uid)
         if not profile:
             return None
+        fans = profile.extra.get("follower_count") or 0
+        if not fans:
+            # acc/info 未带 Wbi 签名时 follower 恒为 0，改用轻量的 relation/stat 补粉丝数
+            try:
+                stat = self._get("/x/relation/stat", {"vmid": uid})
+                fans = int(stat.get("follower") or 0)
+            except Exception:
+                pass  # 补不到时保持 0，认证标记仍然生效
         return {
             "nickname": profile.nickname,
-            "fans": profile.extra.get("follower_count") or 0,
-            # official 为认证机构/个人标题（空串=未认证）
+            "fans": fans,
+            # official 为认证机构/个人标题（空串=未认证），个人认证的知名UP也算
             "is_verified": bool(profile.extra.get("official")),
         }

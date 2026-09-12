@@ -113,7 +113,7 @@ export function currentPlatform() {
   return PLATFORM_MAP[state.view] || null
 }
 
-export async function loadPlatform(platformId, { force = false } = {}) {
+export async function loadPlatform(platformId, { force = false, refresh = false } = {}) {
   const uid = state.uids[platformId]
   if (!uid) return
   const d = state.data[platformId]
@@ -122,7 +122,8 @@ export async function loadPlatform(platformId, { force = false } = {}) {
   d.loading = true
   d.error = ''
   try {
-    const payload = await api.get(`/${platformId}/all`, { uid })
+    // refresh=1 让后端绕过 30 分钟快照缓存实时拉取（"清理缓存"后重载用），日常刷新不带
+    const payload = await api.get(`/${platformId}/all`, { uid, refresh: refresh ? 1 : undefined })
     Object.assign(d, blankPlatformData(), payload, {
       loading: false,
       loaded: true,
@@ -157,6 +158,17 @@ export async function refreshCurrentView() {
     await loadPlatform(state.view, { force: true })
     if (state.view) await loadTimeline({ force: true }) // 平台数据落库后同步时间线
   }
+}
+
+/**
+ * 清空指定平台的运行期内存缓存（适配器缓存/关系图搜索缓存），
+ * 然后绕过快照强制重拉该平台数据并同步时间线。返回清理统计供界面提示。
+ */
+export async function clearPlatformCache(platformId) {
+  const stats = await api.post(`/${platformId}/cache/clear`)
+  await loadPlatform(platformId, { force: true, refresh: true })
+  await loadTimeline({ force: true }) // 重拉的数据落库后，时间线可能产生新事件
+  return stats
 }
 
 // ==================== UID 设置 ====================

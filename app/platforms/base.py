@@ -185,3 +185,34 @@ class BasePlatformAdapter(ABC):
     def get_login_user(self) -> Optional[dict]:
         """获取当前凭证对应的登录用户信息"""
         return None
+
+    # ==================== 缓存清理 ====================
+
+    def clear_cache(self) -> dict:
+        """清空适配器内存缓存，返回 {缓存名: 清理条数} 供界面反馈。
+
+        实例级缓存（用户缓存/session 等）随适配器实例丢弃自动清空，
+        由 AdapterPool.clear_caches() 统一处理；子类只需在此额外清理
+        模块级缓存（如抖音 msToken），并报告实例级缓存的条数。
+        """
+        return {}
+
+    # ==================== 账号可用性测试 ====================
+
+    def test_account(self) -> dict:
+        """测试当前账号凭证可用性（账号弹窗"测试"按钮用），返回 {ok, login_user?, error?, warning?}。
+
+        默认走 check_alive + get_login_user（各平台探测深度不一）；
+        平台存在"轻接口能过但私有接口已失效"的凭证时（如抖音）应覆写加深探测。
+        """
+        try:
+            if not self.check_alive():
+                return {"ok": False, "error": "凭证无效或已过期"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        result: dict = {"ok": True}
+        try:
+            result["login_user"] = self.get_login_user()
+        except Exception as e:
+            result["warning"] = f"登录用户识别失败: {e}"
+        return result

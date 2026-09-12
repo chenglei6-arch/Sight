@@ -625,6 +625,7 @@ async function expandSocial(type) {
   }
   expandBusyIds.add(nid)
   expandMsgs[nid] = '已加入展开队列，等待执行…'
+  startQueuePolling() // 单独展开也必须启动轮询：否则结果（含报错）永远取不回来，节点一直"展开中"
 }
 
 // ==================== 全图一键展开 ====================
@@ -683,11 +684,13 @@ async function bulkExpand() {
     return
   }
   bulk.busy = true
-  bulk.total += stats.queued + stats.duplicates
-  bulk.done += stats.duplicates // 去重跳过的视为已完成，保证 done/total 对得上
+  // 被拒的任务计入 total 并立即记为已处理（失败）：否则分母失真，
+  // 队列已满大量拒单时进度永远到不了 100%
+  bulk.total += stats.queued + stats.duplicates + stats.rejected
+  bulk.done += stats.duplicates + stats.rejected
   for (const id of stats.task_ids || []) bulk.ids.add(id) // 圈定本批任务：轮询只对它们计进度
   bulk.failed += stats.rejected
-  if (stats.rejected) bulk.failReasons.set('入队被拒（预算超限/队列暂停/平台不可用）', stats.rejected)
+  if (stats.rejected) bulk.failReasons.set('入队被拒（预算超限/队列满/队列暂停/平台不可用）', stats.rejected)
   bulkMsg.value = stats.queued
     ? `已入队 ${stats.queued} 个展开任务（每个关注+粉丝各 20 人），各平台队列并行执行…`
     : '所选节点均已在队列中，等待执行结果'
@@ -760,47 +763,68 @@ function sleep(ms) {
 async function pollQueueLoop() {
   const myGen = queuePoll.gen
   let failCount = 0
-  while (queuePoll.active) {
-    const gid = state.activeGraphId
-    if (gid == null) break
-    let data
-    try {
-      data = await api.get('/graph/expand/results', {
-        graph_id: gid,
-        since_id: queuePoll.cursors.get(gid) || 0,
-        limit: 50,
-      })
-      failCount = 0
-    } catch (e) {
-      failCount += 1
-      // 网络抖动：下一轮再试；连续失败达到阈值时如实告知，不再装作"后台执行中"
-      if (failCount >= 5) {
-        const msg = `轮询展开结果连续失败 ${failCount} 次：${e.message}`
-        if (bulk.busy) bulkMsg.value = msg
-        else console.warn('[ViewGraph]', msg)
+  const POLL_LIMIT = 50
+  // finally 兜底：无论循环因何种原因退出（含未预料的异常）都要复位 active，
+  // 否则后续 startQueuePolling 看到 active=true 直接返回，轮询就永久无法重启
+  try {
+    while (queuePoll.active) {
+      const gid = state.activeGraphId
+      if (gid == null) break
+      let data
+      try {
+        data = await api.get('/graph/expand/results', {
+          graph_id: gid,
+          since_id: queuePoll.cursors.get(gid) || 0,
+          limit: POLL_LIMIT,
+        })
+        failCount = 0
+      } catch (e) {
+        failCount += 1
+        // 网络抖动：下一轮再试；连续失败达到阈值时如实告知，不再装作"后台执行中"
+        if (failCount >= 5) {
+          const msg = `轮询展开结果连续失败 ${failCount} 次：${e.message}`
+          if (bulk.busy) bulkMsg.value = msg
+          else console.warn('[ViewGraph]', msg)
+        }
+        await sleep(2000)
+        continue
       }
-      await sleep(2000)
-      continue
+      const got = data.results || []
+      let changed = false
+      // 逐条兜底：单条坏数据绝不能杀死轮询——
+      // 轮询一死 bulk.busy 永远为 true，按钮就永远停在"展开中 (n/m)"，而实际队列早已清空
+      for (const r of got) {
+        try {
+          if (applyTaskResult(r)) changed = true
+        } catch (e) {
+          console.warn('[ViewGraph] 应用展开结果失败（已跳过该条）:', r?.id, e)
+        }
+      }
+      pausedQueues.value = data.paused || []
+      queuePoll.cursors.set(gid, data.cursor || queuePoll.cursors.get(gid) || 0)
+      saveExpandCursors()
+      if (changed) {
+        try {
+          syncFrozenPositions()
+          chart?.setOption(buildOption())
+        } catch (e) {
+          console.warn('[ViewGraph] 图表重渲染失败（轮询继续）:', e)
+        }
+      }
+      // 队列已空且结果页未读满（说明已读到底）才收尾退出。
+      // 熔断会一次性取消几十上百个任务：结果超过一页时若直接退出，
+      // 剩下的完结结果（多为"已取消"）永远不被应用，节点会一直停在"展开中"。
+      const drained = got.length < POLL_LIMIT
+      if (!(data.pending > 0) && drained && queuePoll.gen === myGen) {
+        // 当前图队列已清空且期间没有新入队：一键展开收尾，轮询退出
+        if (bulk.busy) finalizeBulk()
+        break
+      }
+      await sleep(data.pending > 0 ? 1500 : 300)
     }
-    let changed = false
-    for (const r of data.results || []) {
-      if (applyTaskResult(r)) changed = true
-    }
-    pausedQueues.value = data.paused || []
-    queuePoll.cursors.set(gid, data.cursor || queuePoll.cursors.get(gid) || 0)
-    saveExpandCursors()
-    if (changed) {
-      syncFrozenPositions()
-      chart?.setOption(buildOption())
-    }
-    if (!(data.pending > 0) && queuePoll.gen === myGen) {
-      // 当前图队列已清空且期间没有新入队：一键展开收尾，轮询退出
-      if (bulk.busy) finalizeBulk()
-      break
-    }
-    await sleep(data.pending > 0 ? 1500 : 300)
+  } finally {
+    if (queuePoll.gen === myGen) queuePoll.active = false
   }
-  if (queuePoll.gen === myGen) queuePoll.active = false
 }
 
 /**

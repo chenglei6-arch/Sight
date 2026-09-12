@@ -81,6 +81,33 @@ class DouyinAdapter(BasePlatformAdapter):
         self._user_cache[uid] = info
         return info
 
+    def clear_cache(self) -> dict:
+        """清空内存缓存：uid→用户信息缓存 + 模块级 msToken 缓存（实例其余缓存随实例丢弃）"""
+        # msToken 缓存在 ref_utils.mstoken 模块级，适配器实例丢弃清不掉，必须显式清
+        from app.platforms.douyin.ref_utils.mstoken import clear_cache as clear_mstoken
+        clear_mstoken()
+        return {"用户信息缓存": len(self._user_cache)}
+
+    def test_account(self) -> dict:
+        """抖音凭证深探测：get_my_uid 对过期旧 session 也能通过（账号弹窗曾据此误判可用），
+        社交列表接口的登录校验更严，这里补一步列表探测抓住这种"假 alive"。"""
+        result = super().test_account()
+        if not result.get("ok"):
+            return result
+        try:
+            uid = str((result.get("login_user") or {}).get("uid") or "")
+            if uid:
+                self.get_follows(uid, limit=1)
+        except Exception as e:
+            msg = str(e)
+            if "未登录" in msg:
+                result["ok"] = False
+                result["error"] = msg
+            else:
+                # 其余错误（如 2096 平台限制列表可见性）不代表凭证失效，降级为警告
+                result["warning"] = msg
+        return result
+
     # ==================== 认证 ====================
 
     def _load_cookie_str(self) -> str:

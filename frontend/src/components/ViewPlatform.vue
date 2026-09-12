@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import Icon from './ui/Icon.vue'
 import SearchBox from './SearchBox.vue'
 import ProfileCard from './ProfileCard.vue'
@@ -7,7 +7,7 @@ import ContentGrid from './ContentGrid.vue'
 import RecordSection from './RecordSection.vue'
 import EventSection from './EventSection.vue'
 import SocialSection from './SocialSection.vue'
-import { state, currentPlatform, loadPlatform, openQrLogin } from '../store'
+import { state, currentPlatform, loadPlatform, openQrLogin, clearPlatformCache } from '../store'
 
 const platform = computed(() => currentPlatform())
 const uid = computed(() => state.uids[state.view])
@@ -18,6 +18,36 @@ const hasFailed = computed(() => d.value && d.value.error && !d.value.loaded)
 const partialWarnings = computed(() =>
   d.value && d.value.loaded && d.value.errors && d.value.errors.length ? d.value.errors : []
 )
+
+// 清理缓存：清空该平台内存缓存后强制实时重拉数据，结果以行内提示短暂展示
+const clearing = ref(false)
+const clearMsg = ref('')
+const clearIsError = ref(false)
+let clearMsgTimer = null
+
+async function clearCache() {
+  if (clearing.value) return
+  clearing.value = true
+  clearMsg.value = ''
+  try {
+    const stats = await clearPlatformCache(state.view)
+    const parts = []
+    if (stats?.adapters_dropped) parts.push(`适配器缓存 ×${stats.adapters_dropped}`)
+    for (const [name, n] of Object.entries(stats?.cleared || {})) {
+      if (n) parts.push(`${name} ${n} 条`)
+    }
+    if (stats?.search_cache_cleared) parts.push(`搜索缓存 ${stats.search_cache_cleared} 条`)
+    clearMsg.value = parts.length ? `已清理：${parts.join('、')}，数据已重新拉取` : '缓存已清理，数据已重新拉取'
+    clearIsError.value = false
+  } catch (e) {
+    clearMsg.value = '清理失败：' + e.message
+    clearIsError.value = true
+  } finally {
+    clearing.value = false
+    clearTimeout(clearMsgTimer)
+    clearMsgTimer = setTimeout(() => { clearMsg.value = '' }, 6000)
+  }
+}
 
 const sectionIcon = {
   playlist: 'grid',
@@ -60,16 +90,30 @@ const sectionIcon = {
     <template v-else>
       <div class="view-head">
         <SearchBox :platform-id="state.view" />
-        <button
-          v-if="platform.hasQrLogin"
-          class="btn"
-          title="扫码登录后可查看登录账号的关注列表"
-          @click="openQrLogin()"
-        >
-          <Icon name="scan" :size="13" />
-          扫码查关注
-        </button>
+        <div class="head-actions">
+          <button
+            v-if="platform.hasQrLogin"
+            class="btn"
+            title="扫码登录后可查看登录账号的关注列表"
+            @click="openQrLogin()"
+          >
+            <Icon name="scan" :size="13" />
+            扫码查关注
+          </button>
+          <button
+            class="btn"
+            :disabled="clearing"
+            title="清空该平台的内存缓存（适配器缓存、关系图搜索缓存）并绕过快照强制重新拉取数据"
+            @click="clearCache"
+          >
+            <span v-if="clearing" class="spinner spinner-sm" />
+            <Icon v-else name="trash" :size="13" />
+            {{ clearing ? '清理中' : '清理缓存' }}
+          </button>
+        </div>
       </div>
+
+      <p v-if="clearMsg" class="clear-msg" :class="{ 'clear-msg-err': clearIsError }">{{ clearMsg }}</p>
 
       <div v-if="partialWarnings.length" class="banner banner-warn">
         <Icon name="alert" :size="15" style="flex-shrink: 0; margin-top: 1px" />
@@ -172,6 +216,23 @@ const sectionIcon = {
   gap: 12px;
   margin-bottom: 16px;
   flex-wrap: wrap;
+}
+
+.head-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.clear-msg {
+  margin: -8px 0 12px;
+  font-size: 12px;
+  color: var(--success);
+}
+
+.clear-msg-err {
+  color: var(--danger);
 }
 
 .warn-line {

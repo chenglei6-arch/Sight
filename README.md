@@ -39,8 +39,10 @@ python run.py
 ```text
 GET  /api/platforms
 GET  /api/{platform}/search?keyword=xxx
-GET  /api/{platform}/all?uid=xxx
+GET  /api/{platform}/all?uid=xxx                加 refresh=1 绕过 30 分钟快照强制实时拉取
 GET  /api/{platform}/playlist/<item_id>
+POST /api/{platform}/cache/clear                清空平台内存缓存（适配器缓存/搜索缓存）
+POST /api/{platform}/accounts/<id>/test         测试账号 Cookie 可用性（id=primary 或附加账号 id）
 GET  /api/timeline?uids=p1:uid1,p2:uid2
 GET  /api/logs/recent                            内存日志缓冲尾部（SSE 降级轮询）
 GET  /api/logs/stream                            SSE 实时日志流

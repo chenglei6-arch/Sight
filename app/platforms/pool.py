@@ -51,6 +51,7 @@ class AdapterPool:
         self._lock = threading.Lock()
         self._slots: list[_Slot] = []
         self._rr = 0  # 轮询游标
+        self._active: set[str] = set()  # 当前有请求在执行的账号 id（"哪个账号正在展开"展示用）
         self._reload_slots()
 
     # ==================== 槽位维护 ====================
@@ -77,6 +78,29 @@ class AdapterPool:
             for s in self._slots:
                 s.drop_adapter()
 
+    def clear_caches(self) -> tuple[int, dict]:
+        """
+        清空平台运行期内存缓存（"清理缓存"按钮用）：
+        先让各存活适配器清理自己持有的实例缓存/模块级缓存（如抖音 msToken），
+        再丢弃全部适配器实例，下次使用按当前凭证重建。
+
+        返回 (清掉的适配器实例数, {缓存名: 清理条数})
+        """
+        with self._lock:
+            slots = list(self._slots)
+        dropped = 0
+        items: dict[str, int] = {}
+        for s in slots:
+            if s.adapter is not None:
+                dropped += 1
+                try:
+                    for name, n in (s.adapter.clear_cache() or {}).items():
+                        items[name] = items.get(name, 0) + int(n)
+                except Exception:
+                    pass  # 单实例清理失败不阻塞整体（实例随后被丢弃，缓存同样失效）
+            s.drop_adapter()
+        return dropped, items
+
     # ==================== 基本信息 ====================
 
     @property
@@ -96,11 +120,25 @@ class AdapterPool:
             slot = self._slots[0] if self._slots else None
         return slot.get_adapter() if slot else None
 
+    def adapter_for_account(self, account_id: str):
+        """取指定账号槽位的适配器（懒构造，供单账号可用性测试用）；无此账号返回 None"""
+        with self._lock:
+            for s in self._slots:
+                if s.account_id == account_id:
+                    return s.get_adapter()
+        return None
+
     def label_for(self, adapter) -> str:
         """查询适配器所属账号的显示名（错误信息标注用）"""
         with self._lock:
             slot = self._find_slot(adapter)
         return slot.label if slot else "未知账号"
+
+    def active_labels(self) -> list[str]:
+        """当前有请求正在执行的账号标签列表（队列面板"哪个账号正在展开"用）"""
+        with self._lock:
+            active = set(self._active)
+        return [s.label for s in self._slots if s.account_id in active]
 
     # ==================== 租借 ====================
 
@@ -112,12 +150,20 @@ class AdapterPool:
         用法:
             with pool.lease() as adapter:
                 adapter.get_follows(uid, limit)
+
+        租借期间该账号计入 _active，供 active_labels() 报告"哪些账号正在执行"。
         """
         slot = self._acquire()
+        if slot is None:
+            yield None
+            return
+        with self._lock:
+            self._active.add(slot.account_id)
         try:
-            yield slot.get_adapter() if slot else None
+            yield slot.get_adapter()
         finally:
-            pass  # 适配器长期归槽位所有，租借只是"约定本次由它出请求"
+            with self._lock:
+                self._active.discard(slot.account_id)
 
     def _acquire(self) -> Optional[_Slot]:
         with self._lock:

@@ -41,6 +41,8 @@ const extraName = ref('')
 const extraCookie = ref('')
 const addingAccount = ref(false)
 const rowBusy = ref({}) // {id: true} 行级操作进行中
+const rowTesting = ref({}) // {id: true} 行级可用性测试进行中
+const testResults = ref({}) // {id: {ok, text}} 各账号最近一次测试结果
 
 const platformName = computed(() => PLATFORM_MAP[selPlatform.value]?.name || selPlatform.value)
 const canQrLogin = computed(() => selPlatform.value === 'qqmusic')
@@ -82,6 +84,8 @@ function switchPlatform() {
   extraName.value = ''
   extraCookie.value = ''
   message.value = ''
+  rowTesting.value = {}
+  testResults.value = {}
   loadAll()
 }
 
@@ -95,6 +99,8 @@ watch(
     extraCookie.value = ''
     message.value = ''
     rowBusy.value = {}
+    rowTesting.value = {}
+    testResults.value = {}
     accounts.value = null
     await loadAll()
   }
@@ -167,6 +173,29 @@ async function delAccount(a) {
   }
 }
 
+// 真实调用平台接口探测账号可用性（主账号 id 固定为 primary）
+async function testAccount(a) {
+  const id = a.id
+  if (rowTesting.value[id]) return
+  rowTesting.value = { ...rowTesting.value, [id]: true }
+  try {
+    const r = await api.post(`/accounts/${selPlatform.value}/${id}/test`)
+    let text
+    if (r.ok) {
+      const who = r.login_user?.nickname || r.login_user?.uid || ''
+      text = `可用${who ? `（登录：${who}）` : ''} · ${r.latency_ms}ms`
+      if (r.warning) text += `，注意：${r.warning}`
+    } else {
+      text = '不可用' + (r.error ? `：${r.error}` : '')
+    }
+    testResults.value = { ...testResults.value, [id]: { ok: !!r.ok, text } }
+  } catch (e) {
+    testResults.value = { ...testResults.value, [id]: { ok: false, text: '测试失败：' + e.message } }
+  } finally {
+    rowTesting.value = { ...rowTesting.value, [id]: false }
+  }
+}
+
 async function afterChange() {
   await loadPlatformsMeta() // 刷新侧栏/平台 chips 的凭证状态
   await loadAll()
@@ -199,12 +228,24 @@ function qrLogin() {
       <template v-else-if="status?.has_credential">
         <Icon name="check" :size="13" class="ck-ok" />
         已配置 Cookie（{{ status.cookie_keys.length }} 个字段，保存于 credentials/{{ selPlatform }}_cookie.txt）
+        <button
+          class="btn btn-sm ck-status-btn"
+          :disabled="rowTesting['primary']"
+          @click="testAccount({ id: 'primary' })"
+        >
+          <span v-if="rowTesting['primary']" class="spinner spinner-sm" />
+          {{ rowTesting['primary'] ? '测试中' : '测试可用性' }}
+        </button>
       </template>
       <template v-else>
         <Icon name="alert" :size="13" class="ck-miss" />
         未配置 Cookie —— 搜索/资料接口大概率失败
       </template>
     </div>
+
+    <p v-if="testResults['primary']" class="ck-test-result" :class="{ 'ck-test-err': !testResults['primary'].ok }">
+      {{ testResults['primary'].text }}
+    </p>
 
     <p class="ck-howto">{{ howto }}</p>
 
@@ -252,8 +293,15 @@ function qrLogin() {
           <div class="ck-acc-meta">
             {{ a.has_credential ? `Cookie ${a.cookie_keys.length} 个字段` : '未配置 Cookie' }}
           </div>
+          <div v-if="testResults[a.id]" class="ck-acc-test" :class="{ 'ck-test-err': !testResults[a.id].ok }">
+            {{ testResults[a.id].text }}
+          </div>
         </div>
         <div class="ck-acc-ops">
+          <button class="btn btn-sm" :disabled="rowTesting[a.id]" @click="testAccount(a)">
+            <span v-if="rowTesting[a.id]" class="spinner spinner-sm" />
+            {{ rowTesting[a.id] ? '测试中' : '测试' }}
+          </button>
           <button class="btn btn-sm" :disabled="rowBusy[a.id]" @click="toggleAccount(a)">
             {{ a.enabled ? '停用' : '启用' }}
           </button>
@@ -355,6 +403,20 @@ function qrLogin() {
 
 .ck-miss {
   color: var(--warn);
+}
+
+.ck-status-btn {
+  margin-left: auto;
+}
+
+.ck-test-result {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--success);
+}
+
+.ck-test-err {
+  color: var(--danger);
 }
 
 .ck-howto {
@@ -463,6 +525,16 @@ function qrLogin() {
   font-size: 11.5px;
   color: var(--text-3);
   margin-top: 2px;
+}
+
+.ck-acc-test {
+  font-size: 11.5px;
+  margin-top: 3px;
+  color: var(--success);
+}
+
+.ck-acc-test.ck-test-err {
+  color: var(--danger);
 }
 
 .ck-empty {

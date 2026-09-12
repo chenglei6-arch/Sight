@@ -198,6 +198,20 @@ function queueState(q) {
   return { label: '空闲', cls: 'st-idle', title: '' }
 }
 
+// 任务的方向级账号明细："关注←主账号 · 粉丝←账号2"。
+// 旧后端无 account_map 时退回账号并集展示
+function accText(t) {
+  const m = t.account_map
+  if (m) {
+    const parts = []
+    if (m.follows?.length) parts.push(`关注←${m.follows.join('、')}`)
+    if (m.followers?.length) parts.push(`粉丝←${m.followers.join('、')}`)
+    if (m.intercheck?.length) parts.push(`互查←${m.intercheck.join('、')}`)
+    if (parts.length) return parts.join(' · ')
+  }
+  return t.accounts?.length ? t.accounts.join('、') : '分配账号中…'
+}
+
 function showQueueLogs() {
   // 跳到日志页签并清空平台过滤，便于查看全部队列日志
   setTerminalTab('logs')
@@ -318,25 +332,46 @@ watch(
         <div v-if="resumeError" class="log-line lv-error"><span class="log-text">{{ resumeError }}</span></div>
 
         <div class="queue-list">
-          <div v-for="q in state.queues" :key="q.platform" class="queue-row">
-            <span class="q-dot" :style="{ background: platformColor(q.platform) }" />
-            <span class="q-name">{{ platformName(q.platform) }}</span>
-            <span class="q-state" :class="queueState(q).cls" :title="queueState(q).title">
-              {{ queueState(q).label }}
-            </span>
-            <span class="q-meta" :title="`账号池 ${q.accounts} 个 · 任务间隔 ${q.interval}s`">
-              {{ q.accounts }} 账号
-            </span>
-            <button
-              v-if="q.paused"
-              class="t-btn"
-              :disabled="resuming === q.platform"
-              title="解除熔断，恢复该平台队列"
-              @click="resumeQueue(q.platform)"
-            >
-              <Icon name="refresh" :size="13" />
-            </button>
-          </div>
+          <template v-for="q in state.queues" :key="q.platform">
+            <div class="queue-row">
+              <span class="q-dot" :style="{ background: platformColor(q.platform) }" />
+              <span class="q-name">{{ platformName(q.platform) }}</span>
+              <span class="q-state" :class="queueState(q).cls" :title="queueState(q).title">
+                {{ queueState(q).label }}
+              </span>
+              <span class="q-meta" :title="`账号池 ${q.accounts} 个 · 任务间隔 ${q.interval}s`">
+                {{ q.accounts }} 账号
+              </span>
+              <button
+                v-if="q.paused"
+                class="t-btn"
+                :disabled="resuming === q.platform"
+                title="解除熔断，恢复该平台队列"
+                @click="resumeQueue(q.platform)"
+              >
+                <Icon name="refresh" :size="13" />
+              </button>
+            </div>
+            <!-- 任务明细：正在展开哪些用户、哪个账号在展开 -->
+            <div v-if="q.running_tasks?.length || q.pending_tasks?.length" class="q-tasks">
+              <div v-for="t in q.running_tasks" :key="`r${t.id}`" class="q-task q-task-run">
+                <span class="spinner spinner-sm" />
+                <span class="q-task-name" :title="`${t.nickname || t.uid}（${q.platform}:${t.uid}）`">
+                  {{ t.nickname || t.uid }}
+                </span>
+                <span class="q-task-acc" :title="accText(t)">{{ accText(t) }}</span>
+              </div>
+              <div v-for="t in q.pending_tasks" :key="`p${t.id}`" class="q-task">
+                <Icon name="clock" :size="11" />
+                <span class="q-task-name" :title="`${t.nickname || t.uid}（${q.platform}:${t.uid}）`">
+                  {{ t.nickname || t.uid }}
+                </span>
+              </div>
+              <div v-if="q.pending > (q.pending_tasks?.length || 0)" class="q-task q-task-more">
+                …还有 {{ q.pending - q.pending_tasks.length }} 个在排队
+              </div>
+            </div>
+          </template>
           <div v-if="!state.queues.length" class="log-empty">队列状态加载中…</div>
         </div>
 
@@ -652,6 +687,54 @@ watch(
 .q-meta {
   color: #586069;
   font-size: 11.5px;
+}
+
+/* ---------- 队列任务明细 ---------- */
+.q-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 8px 8px 27px;
+}
+
+.q-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #8b93a1;
+  min-width: 0;
+}
+
+.q-task .spinner-sm {
+  width: 11px;
+  height: 11px;
+  border-width: 1.5px;
+  flex-shrink: 0;
+}
+
+.q-task-run {
+  color: #4ade80;
+}
+
+.q-task-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.q-task-acc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #6d94ea;
+}
+
+.q-task-more {
+  color: #586069;
 }
 
 .queue-hint {
