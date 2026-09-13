@@ -1,7 +1,7 @@
 """
 抖音平台适配器 — 基于 chenglei6-arch/DouYin_Spider（cv-cat/DouYin_Spider 的 fork）的纯 API 实现
 
-上游与同步约定见 docs/UPSTREAM_SYNC.md（含 following 列表 max_time 修复说明）。
+上游与同步约定见 docs/MANUAL.md（cv-cat 原仓库有 bug，勿从原仓库同步，以作者 fork 为准）。
 
 架构说明:
   - 本适配器直接复用上游的 DouyinAPI 静态方法，不做 SSR 兜底

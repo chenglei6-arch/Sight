@@ -2,7 +2,7 @@
 小红书平台适配器 — 基于 cv-cat/Spider_XHS（PC 签名栈）
 
 参考项目: https://github.com/cv-cat/Spider_XHS
-上游同步说明: docs/UPSTREAM_SYNC.md
+上游同步说明: docs/MANUAL.md
 
 架构说明:
   - ref_xhs_core/*, ref_xhs_pc/* 是 Spider_XHS 的移植模块
