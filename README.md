@@ -1,7 +1,13 @@
-# Sight 多平台用户数据监控
+# Sight
 
-Sight 用统一界面采集和对比 7 个平台（网易云音乐、哔哩哔哩、抖音、QQ 音乐、微博、原神、小红书）的公开用户数据，生成历史快照、变化事件、统一时间线和跨平台关系图谱。
+这是一个基于视奸对象在各平台公开数据进行一系列推理排查的项目,核心思想是利用看似无关紧要的数据形成对该视奸对象及其社交网络的全面认知
 
+- **功能一**：直接查询对象在各平台的公开数据（基本基于其他开源项目的手段）
+- **功能二**：通过对比不同时间对象在各平台的公开数据，推测对象一段时间内的行为
+- **功能三**：通过分析对象在各平台的公开数据，生成社交网络关系图谱
+- **功能四**（开发中）：接入agent生成一站式的人物形象侧写
+
+目前支持的平台有：网易云音乐、哔哩哔哩、抖音、QQ音乐、微博、小红书
 ## 快速开始
 
 环境要求：Python 3.10+，Node.js 20+（前端构建与抖音签名）。
@@ -24,7 +30,7 @@ npm run build     # 构建到 app/web/，由 Flask 托管
 
 ## Cookie 配置
 
-所有凭证统一存储在 `credentials/accounts.json`（已被 Git 忽略，切勿提交）。
+所有凭证统一存储在 `credentials/accounts.json`。
 推荐在面板中配置：图谱页平台状态条 →「配置 Cookie」粘贴即可，主账号与多账号（并发加速）在同一弹窗管理。
 
 也可以手动编辑 `credentials/accounts.json`，每个平台是一个账号数组：
@@ -134,40 +140,11 @@ frontend/src/
 |------|------|------|
 | [cv-cat/DouYin_Spider](https://github.com/cv-cat/DouYin_Spider) | 仓库未附 LICENSE | 抖音 API 与签名代码**移植**为 `app/platforms/douyin/ref_*`。**原仓库有 bug（关注列表接口）不可直接使用**，以修复版 fork [chenglei6-arch/DouYin_Spider](https://github.com/chenglei6-arch/DouYin_Spider) 为准 |
 | [cv-cat/Spider_XHS](https://github.com/cv-cat/Spider_XHS) | 仓库未附 LICENSE | 小红书 PC 签名栈**移植**为 `app/platforms/xhs/ref_*` |
-| [jsososo/QQMusicApi](https://github.com/jsososo/QQMusicApi) | GPL-3.0 | QQ 音乐接口文档参考，未复制代码（适配器自写） |
-| [Womsxd/YuanShen_User_Info](https://github.com/Womsxd/YuanShen_User_Info) | MIT | 原神「Cookie 自动获取绑定 UID」设计参考，未复制代码 |
 | [nghuyong/WeiboSpider](https://github.com/nghuyong/WeiboSpider) | MIT | 微博关注/粉丝列表请求构造参考，未复制代码 |
 
 上游仓库的本地参考副本在 `reference/`（git 忽略）；同步范围与本地修复见 [`docs/MANUAL.md`](docs/MANUAL.md)。
 
-## 常用 API
-
-```text
-# 平台数据
-GET  /api/platforms                            平台列表与凭证状态
-GET  /api/{platform}/search?keyword=xxx        用户搜索
-GET  /api/{platform}/all?uid=xxx               资料/内容/关系聚合（refresh=1 绕过 30 分钟快照）
-GET  /api/{platform}/playlist/<item_id>        内容详情
-GET  /api/timeline?uids=p1:uid1,p2:uid2        跨平台统一时间线
-POST /api/{platform}/cache/clear               清空平台内存缓存
-POST /api/{platform}/accounts/<id>/test        测试账号 Cookie 可用性（primary 或附加账号 id）
-
-# 关系图谱
-GET  /api/graph/search?keyword=xxx             跨平台搜索生成关系图
-POST /api/graph/expand/enqueue                 展开任务批量入队（按平台隔离队列）
-GET  /api/graph/expand/results                 增量轮询展开结果
-POST /api/graph/expand/stop | resume           停止 / 恢复平台队列
-GET  /api/graph/expand/status                  各平台队列状态
-POST /api/graph/save                           按名称保存图谱（同名覆盖）
-GET  /api/graph/saved[/<id>]                   已保存图谱列表 / 完整数据
-DELETE /api/graph/saved/<id>                   删除已保存图谱
-
-# 运维
-GET  /api/logs/recent?after=seq                内存日志增量轮询
-GET  /api/logs/stream?after=seq                SSE 实时日志流
-```
-
 ## 文档
 
-平台实现与坑、错误约定、接入新平台清单、上游同步范围：
-见 [`docs/MANUAL.md`](docs/MANUAL.md)。
+- [`docs/API.md`](docs/API.md)：REST / SSE 接口一览
+- [`docs/MANUAL.md`](docs/MANUAL.md)：平台实现与坑、错误约定、接入新平台清单、上游同步范围
