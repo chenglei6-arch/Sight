@@ -50,3 +50,7 @@ reference/
 
 # 临时文件
 tmp/
+
+# Frontend test artifacts
+frontend/test-results/
+frontend/playwright-report/

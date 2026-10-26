@@ -174,6 +174,25 @@ def _error(msg, code=-1, http_status=500):
 
 # ==================== 平台管理 ====================
 
+@bp.route("/bilibili/archives")
+def bilibili_archives():
+    """按需查询一页第三方评论/弹幕存档，不向第三方传递 B 站凭证。"""
+    from app.services.bilibili_archives import archives
+
+    try:
+        page = int(request.args.get("page", "1"))
+        page_size = int(request.args.get("page_size", "20"))
+        data = archives.fetch(
+            request.args.get("source", "aicu_reply"),
+            request.args.get("uid", "").strip(), page, page_size,
+        )
+        return _result(data)
+    except ValueError as e:
+        return _error(str(e), http_status=400)
+    except Exception as e:
+        return _error(str(e), http_status=502)
+
+
 @bp.route("/platforms")
 def list_platforms_api():
     """列出所有可用平台及其状态"""

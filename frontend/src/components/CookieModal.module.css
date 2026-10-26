@@ -1,0 +1,263 @@
+.ck-platform-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ck-platform-label {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.ck-platform-select {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface);
+  outline: none;
+}
+
+.ck-platform-select:focus {
+  border-color: var(--accent);
+}
+
+.ck-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 4px 0 8px;
+}
+
+.ck-section-note {
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.ck-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 16px 0 12px;
+}
+
+.ck-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+}
+
+.ck-ok {
+  color: var(--success);
+}
+
+.ck-miss {
+  color: var(--warn);
+}
+
+.ck-status-btn {
+  margin-left: auto;
+}
+
+.ck-test-result {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--success);
+}
+
+.ck-test-err {
+  color: var(--danger);
+}
+
+.ck-howto {
+  margin: 10px 0 8px;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.7;
+}
+
+.ck-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: var(--font, inherit);
+  color: var(--text);
+  background: var(--surface);
+  resize: vertical;
+  outline: none;
+}
+
+.ck-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.ck-msg {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--success);
+}
+
+.ck-msg-err {
+  color: var(--danger);
+}
+
+.ck-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.ck-spacer {
+  flex: 1;
+}
+
+.ck-tip {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+/* ===== 附加账号列表 ===== */
+.ck-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.ck-acc-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+}
+
+.ck-acc-disabled {
+  opacity: 0.55;
+}
+
+.ck-acc-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.ck-acc-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ck-badge {
+  font-size: 10.5px;
+  font-weight: 400;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--text-3);
+}
+
+.ck-badge-off {
+  border: 1px solid var(--border);
+}
+
+.ck-acc-meta {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 2px;
+}
+
+.ck-acc-test {
+  font-size: 11.5px;
+  margin-top: 3px;
+  color: var(--success);
+}
+
+.ck-acc-test.ck-test-err {
+  color: var(--danger);
+}
+
+.ck-empty {
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  margin: 0 0 10px;
+}
+
+.ck-acc-ops {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.ck-del {
+  color: var(--danger);
+}
+
+/* Match the priority of the former scoped rule over the shared button size. */
+.btn-sm.btn-sm {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+/* ===== 添加表单 ===== */
+.ck-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ck-add-row {
+  display: flex;
+}
+
+.ck-name-input {
+  flex: 1;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface);
+  outline: none;
+}
+
+.ck-name-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.ck-add-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ck-add-tip {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.5;
+}

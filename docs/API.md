@@ -20,6 +20,12 @@ REST 层是唯一把异常转 JSON 的边界，失败返回 `{"code": -1, "messa
 | PUT / DELETE | `/timeline/<entry_id>` | 时间线条目编辑 / 删除 |
 | POST | `/{platform}/cache/clear` | 清空平台运行期内存缓存（SQLite 快照不删，前端随后以 `refresh=1` 强制实时） |
 
+### B 站第三方评论与弹幕存档
+
+`GET /api/bilibili/archives?uid=123&source=aicu_reply&page=1&page_size=20`
+
+`source` 可选 `aicu_reply`（评论）、`aicu_danmaku`（视频弹幕）、`danmakus`（直播弹幕及互动）；UID 必须是正整数，页码 1~1000，每页 1~50。只按需查询一页，不使用 B 站 Cookie。成功返回 `events / source_name / source_url / page / total / total_unit / has_more / truncated / fetched_at / cached / notice` 等字段；Danmakus 的分页单位为直播场次，上游页码从 0 开始，由服务端统一转换。参数错误 HTTP 400，上游失败 HTTP 502；5 分钟内存缓存，同源请求间隔至少 2 秒。调研、使用及限制见 [Aicu / Danmakus 接入说明](BILIBILI_ARCHIVES.md)。
+
 ## 凭证与多账号
 
 主账号固定 id `primary`（`/credentials` 即它的更新入口，历史记录等私有数据接口固定使用）；

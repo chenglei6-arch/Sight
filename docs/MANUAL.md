@@ -41,6 +41,11 @@ refresh_user_info / check_alive / get_login_user`。
 - 业务 code 错误（如 -404 用户不存在）直接 `raise`，不重试；
   `last_api_error` 实例属性保存最近一次业务错误供上层拼装原因。
 
+- 第三方评论/弹幕存档由独立的 `services/bilibili_archives.py` 提供，入口是
+  `/api/bilibili/archives`；前端 B 站页按需查询 Aicu 评论/视频弹幕、Danmakus 直播记录。
+  不经过 B 站账号池或 `/all` 快照，使用独立请求会话、同源限速和 5 分钟内存缓存。
+  开源核查、接口字段与限制见 [Aicu / Danmakus 接入说明](BILIBILI_ARCHIVES.md)。
+
 ### 抖音（douyin）
 
 - **上游 [cv-cat/DouYin_Spider](https://github.com/cv-cat/DouYin_Spider) 有关键 bug，不可直接使用或同步**：
@@ -96,7 +101,7 @@ refresh_user_info / check_alive / get_login_user`。
 ① app/platforms/<id>/adapter.py    新建适配器（实现 base.py 抽象接口）
 ② app/platforms/__init__.py        _factory_for() 加分支 + known_platform_ids() 加 id
 ③ app/credentials/__init__.py      PLATFORMS 元组加平台 id
-④ frontend/src/platforms.js        PLATFORMS 数组加渲染配置（侧边栏/视图全由它驱动）
+④ frontend/src/platforms.ts        PLATFORMS 数组加渲染配置（侧边栏/视图全由它驱动）
 ⑤ app/services/timeline.py         PLATFORM_NAME_MAP / CONTENT_TYPE_MAP 加映射
 ⑥ docs/MANUAL.md                   平台矩阵与要点补一行
 ```

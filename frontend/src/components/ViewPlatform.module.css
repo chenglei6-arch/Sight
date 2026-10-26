@@ -1,0 +1,78 @@
+.setup-card {
+  padding: 56px 24px;
+}
+
+.setup-hint {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.setup-search {
+  margin-top: 10px;
+  justify-content: center;
+}
+
+.error-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 56px 24px;
+  text-align: center;
+}
+
+.error-msg {
+  font-size: 13px;
+  color: var(--danger);
+  max-width: 480px;
+  word-break: break-all;
+}
+
+.error-hint {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.error-card .btn {
+  margin-top: 8px;
+}
+
+.view-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.head-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.clear-msg {
+  margin: -8px 0 12px;
+  font-size: 12px;
+  color: var(--success);
+}
+
+.clear-msg-err {
+  color: var(--danger);
+}
+
+.warn-line {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.empty-inline {
+  padding: 18px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font-size: 12.5px;
+  text-align: center;
+}

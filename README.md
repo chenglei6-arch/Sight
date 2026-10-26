@@ -10,7 +10,7 @@
 目前支持的平台有：网易云音乐、哔哩哔哩、抖音、QQ音乐、微博、小红书
 ## 快速开始
 
-环境要求：Python 3.10+，Node.js 20+（前端构建与抖音签名）。
+环境要求：Python 3.10+，Node.js 22.12+（前端构建与抖音签名）。
 
 ```bash
 python -m venv .venv
@@ -54,7 +54,7 @@ npm run build     # 构建到 app/web/，由 Flask 托管
 
 ```mermaid
 flowchart LR
-    UI["前端 Vue3 + ECharts<br/>平台视图 / 时间线 / 图谱 / 终端"]
+    UI["前端 React + TypeScript + ECharts<br/>平台视图 / 时间线 / 图谱 / 终端"]
     API["routes/api.py<br/>REST + SSE 唯一入口"]
     POOL["AdapterPool<br/>多账号租借轮询"]
     ADP["平台适配器 ×7"]
@@ -103,7 +103,7 @@ flowchart TD
 关键约定与接入新平台的完整约束见 [`docs/MANUAL.md`](docs/MANUAL.md)：
 
 - 适配器与服务层失败一律 `raise`（带平台前缀/账号标签/风控码），不返回空值伪装成功；唯一转 JSON 的边界在 REST 层
-- `frontend/src/platforms.js` 与适配器返回字段严格对应，改一边要同步另一边
+- `frontend/src/platforms.ts` 与适配器返回字段严格对应，改一边要同步另一边
 - 移植代码的上游同步范围见 [`docs/MANUAL.md`](docs/MANUAL.md)
 
 ## 项目结构
@@ -127,9 +127,9 @@ app/
 └── web/                     前端构建产物（勿手改）
 
 frontend/src/
-├── store.js                 全局状态与数据加载编排
-├── platforms.js             平台元信息与渲染配置（与后端字段契约）
-└── components/View*.vue     平台视图 / 时间线 / 关系图谱 / 终端
+├── store.ts                 全局状态与数据加载编排
+├── platforms.ts             平台元信息与渲染配置（与后端字段契约）
+└── components/View*.tsx     平台视图 / 时间线 / 关系图谱 / 终端
 ```
 
 ## 第三方仓库声明
@@ -147,4 +147,5 @@ frontend/src/
 ## 文档
 
 - [`docs/API.md`](docs/API.md)：REST / SSE 接口一览
+- [`docs/BILIBILI_ARCHIVES.md`](docs/BILIBILI_ARCHIVES.md)：Aicu / Danmakus 开源调研与评论、弹幕存档查询接入
 - [`docs/MANUAL.md`](docs/MANUAL.md)：平台实现与坑、错误约定、接入新平台清单、上游同步范围

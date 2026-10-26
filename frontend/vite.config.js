@@ -1,21 +1,33 @@
-import { defineConfig } from 'vite'
-import vue from '@vitejs/plugin-vue'
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 // 构建产物输出到 Flask 的 app/web 目录，由 Flask 直接托管；
-// 开发模式下 5173 端口把 /api 代理到 Flask 5000。
+// 开发模式下 5173 端口把 /api 代理到 Flask 5001。
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [react()],
   server: {
     port: 5173,
     proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:5000',
+      "/api": {
+        target: "http://127.0.0.1:5001",
         changeOrigin: true,
       },
     },
   },
   build: {
-    outDir: '../app/web',
+    outDir: "../app/web",
     emptyOutDir: true,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: "echarts",
+              test: /[\\/]node_modules[\\/](echarts|zrender)[\\/]/,
+            },
+          ],
+        },
+      },
+    },
   },
-})
+});
